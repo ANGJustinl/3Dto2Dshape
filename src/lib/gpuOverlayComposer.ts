@@ -1,4 +1,3 @@
-import type { GpuRasterAtlasState } from './gpuPartRasterizer';
 import type { ProjectedPartShape, ProjectionOverlaySettings } from './partProjection';
 import { getSharedWebGpuContext } from './webgpuShared';
 
@@ -150,9 +149,6 @@ const buildLoopCoverageMask = (
 };
 
 const sampleCpuDepth = (shape: ProjectedPartShape, x: number, y: number) => {
-    if (shape.depthField.kind !== 'cpu') {
-        return Number.POSITIVE_INFINITY;
-    }
     const localX = Math.max(0, Math.min(shape.depthField.width - 1, Math.floor(x - shape.depthField.offsetX)));
     const localY = Math.max(0, Math.min(shape.depthField.height - 1, Math.floor(y - shape.depthField.offsetY)));
     return shape.depthField.values[localY * shape.depthField.width + localX];
@@ -165,7 +161,7 @@ const buildPreparedShape = (
     settings: ProjectionOverlaySettings,
 ): PreparedShape | null => {
     const bounds = getShapeBounds(shape, viewportWidth, viewportHeight);
-    if (!bounds || shape.depthField.kind !== 'cpu') {
+    if (!bounds) {
         return null;
     }
 
@@ -210,7 +206,6 @@ export class GpuOverlayComposer {
     async render(
         canvas: HTMLCanvasElement,
         shapes: ProjectedPartShape[],
-        _atlasState: GpuRasterAtlasState | null,
         viewportWidth: number,
         viewportHeight: number,
         settings: ProjectionOverlaySettings,

@@ -22,13 +22,6 @@ export type GpuRasterizedPartData = {
     atlasHeight: number;
 };
 
-export type GpuRasterAtlasState = {
-    maskTexture: GPUTextureLike;
-    texture: GPUTextureLike;
-    atlasWidth: number;
-    atlasHeight: number;
-};
-
 type PartBounds = {
     width: number;
     height: number;
@@ -223,19 +216,6 @@ class GpuPartRasterizer {
             ),
         );
         return results;
-    }
-
-    getDepthAtlasState() {
-        if (!this.maskTexture || !this.depthTexture) {
-            return null;
-        }
-
-        return {
-            maskTexture: this.maskTexture,
-            texture: this.depthTexture,
-            atlasWidth: this.atlasWidth,
-            atlasHeight: this.atlasHeight,
-        } satisfies GpuRasterAtlasState;
     }
 
     private async getDevice() {
