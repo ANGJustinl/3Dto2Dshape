@@ -1,5 +1,6 @@
 import type { ProjectionPartSource } from './modelParts';
 import type { MeshProjectionCache } from './partProjection';
+import { recordPerfSample } from './perfLogger';
 import { getSharedWebGpuContext } from './webgpuShared';
 
 type GPUBufferLike = any;
@@ -110,13 +111,16 @@ class GpuPartRasterizer {
     private atlasHeight = 1;
 
     async rasterizeBatch(requests: RasterizeRequest[]) {
+        const totalStart = performance.now();
         const device = await this.getDevice();
         if (!device) {
             return [] as Array<GpuRasterizedPartData | null>;
         }
 
         this.ensurePipeline(device);
+        const prepareStart = performance.now();
         const preparedRequests = this.prepareRequests(requests);
+        const prepareMs = performance.now() - prepareStart;
         if (preparedRequests.length === 0) {
             return [] as Array<GpuRasterizedPartData | null>;
         }
@@ -131,6 +135,7 @@ class GpuPartRasterizer {
         );
         this.ensureAtlasTextures(device, atlasWidth, atlasHeight);
 
+        const encodeStart = performance.now();
         const commandEncoder = device.createCommandEncoder();
         const computePass = commandEncoder.beginComputePass();
         computePass.setPipeline(this.pipeline);
@@ -194,7 +199,9 @@ class GpuPartRasterizer {
             { buffer: depthReadbackBuffer, bytesPerRow: depthBytesPerRow, rowsPerImage: atlasHeight },
             { width: atlasWidth, height: atlasHeight, depthOrArrayLayers: 1 },
         );
+        const encodeMs = performance.now() - encodeStart;
 
+        const submitReadbackStart = performance.now();
         device.queue.submit([commandEncoder.finish()]);
         await Promise.all([maskReadbackBuffer.mapAsync(1), depthReadbackBuffer.mapAsync(1)]);
         const maskPixels = new Uint8Array(maskReadbackBuffer.getMappedRange().slice(0));
@@ -203,7 +210,9 @@ class GpuPartRasterizer {
         depthReadbackBuffer.unmap();
         maskReadbackBuffer.destroy();
         depthReadbackBuffer.destroy();
+        const submitReadbackMs = performance.now() - submitReadbackStart;
 
+        const extractStart = performance.now();
         const results = preparedRequests.map((request) =>
             this.extractRasterizedData(
                 maskPixels,
@@ -215,6 +224,19 @@ class GpuPartRasterizer {
                 atlasHeight,
             ),
         );
+        const extractMs = performance.now() - extractStart;
+
+        recordPerfSample({
+            label: 'gpu-rasterizer',
+            values: {
+                prepareRequests: prepareMs,
+                encode: encodeMs,
+                submitReadback: submitReadbackMs,
+                extractResults: extractMs,
+                total: performance.now() - totalStart,
+            },
+        });
+
         return results;
     }
 

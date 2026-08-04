@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { getGpuPartRasterizer, type GpuRasterizedPartData } from './gpuPartRasterizer';
 import type { ProjectionPartSource, ProjectionSharedChain } from './modelParts';
+import { recordPerfSample } from './perfLogger';
 import type { ProjectionFrameResult } from './webgpuScreenProjector';
 
 export type ProjectionOverlaySettings = {
@@ -540,6 +541,7 @@ const buildProjectedPartShapeFromRasterData = (
     settings: ProjectionOverlaySettings,
     rasterData: GpuRasterizedPartData,
 ) => {
+    const sharedChainsStart = performance.now();
     const projectedSharedChains = buildProjectedSharedChainsForPart(
         part,
         part.leafId,
@@ -553,24 +555,33 @@ const buildProjectedPartShapeFromRasterData = (
         },
         settings.simplifyEpsilon,
     );
-    const loops = extractLoopsFromMask(
+    const buildSharedChainsMs = performance.now() - sharedChainsStart;
+
+    const extractLoopsStart = performance.now();
+    const extractedLoops = extractLoopsFromMask(
         rasterData.occupied,
         rasterData.width,
         rasterData.height,
         rasterData.offsetX,
         rasterData.offsetY,
-    )
-        .map((loop) =>
-            simplifyLoopByAnchorIndices(
+    );
+    const extractLoopsMs = performance.now() - extractLoopsStart;
+
+    const simplifyLoopsStart = performance.now();
+    const loops = extractedLoops
+        .map((loop) => {
+            const anchorIndices = collectContourAnchorIndices(
                 loop,
-                collectContourAnchorIndices(
-                    loop,
-                    projectedSharedChains.mask,
-                    rasterData.width,
-                    rasterData.height,
-                    rasterData.offsetX,
-                    rasterData.offsetY,
-                ),
+                projectedSharedChains.mask,
+                rasterData.width,
+                rasterData.height,
+                rasterData.offsetX,
+                rasterData.offsetY,
+            );
+
+            return simplifyLoopByAnchorIndices(
+                loop,
+                anchorIndices,
                 settings.simplifyEpsilon,
                 projectedSharedChains.mask,
                 projectedSharedChains.chains,
@@ -578,15 +589,25 @@ const buildProjectedPartShapeFromRasterData = (
                 rasterData.height,
                 rasterData.offsetX,
                 rasterData.offsetY,
-            ),
-        )
+            );
+        })
         .filter((loop) => loop.length >= 3 && Math.abs(polygonArea(loop)) > 6);
+    const simplifyLoopsMs = performance.now() - simplifyLoopsStart;
 
     if (loops.length === 0) {
-        return null;
+        return {
+            shape: null,
+            timings: {
+                buildSharedChains: buildSharedChainsMs,
+                extractLoops: extractLoopsMs,
+                simplifyLoops: simplifyLoopsMs,
+                finalizeShape: 0,
+            },
+        };
     }
 
-    return {
+    const finalizeShapeStart = performance.now();
+    const shape = {
         leafId: part.leafId,
         color: part.color,
         depth: rasterData.nearestDepth,
@@ -606,6 +627,17 @@ const buildProjectedPartShapeFromRasterData = (
             values: rasterData.occupied,
         },
     } satisfies ProjectedPartShape;
+    const finalizeShapeMs = performance.now() - finalizeShapeStart;
+
+    return {
+        shape,
+        timings: {
+            buildSharedChains: buildSharedChainsMs,
+            extractLoops: extractLoopsMs,
+            simplifyLoops: simplifyLoopsMs,
+            finalizeShape: finalizeShapeMs,
+        },
+    };
 };
 
 export const createProjectionMaskState = (
@@ -630,6 +662,8 @@ export const collectProjectedPartShapesForGpuFrame = async (
         return null;
     }
 
+    const totalStart = performance.now();
+
     const filteredParts = parts.filter(
         (part) =>
             part.triangleCount >= settings.minTriangleCount &&
@@ -640,6 +674,7 @@ export const collectProjectedPartShapesForGpuFrame = async (
     }
 
     const rasterizer = getGpuPartRasterizer();
+    const prepareStart = performance.now();
     const preparedParts = filteredParts
         .map((part) => {
             const projectionCache = frame.getProjectionCache(part.mesh);
@@ -670,9 +705,17 @@ export const collectProjectedPartShapesForGpuFrame = async (
                 fallbackDepth: number;
             } => preparedPart !== null,
         );
+    const prepareMs = performance.now() - prepareStart;
 
+    const rasterStart = performance.now();
     const rasterResults = await rasterizer.rasterizeBatch(preparedParts);
+    const rasterMs = performance.now() - rasterStart;
 
+    let buildSharedChainsMs = 0;
+    let extractLoopsMs = 0;
+    let simplifyLoopsMs = 0;
+    let finalizeShapeMs = 0;
+    const buildStart = performance.now();
     const shapes = preparedParts
         .map((preparedPart, index) => {
             const rasterData = rasterResults[index] ?? null;
@@ -680,15 +723,36 @@ export const collectProjectedPartShapesForGpuFrame = async (
                 return null;
             }
 
-            return buildProjectedPartShapeFromRasterData(
+            const result = buildProjectedPartShapeFromRasterData(
                 preparedPart.part,
                 state,
                 preparedPart.projectionCache,
                 settings,
                 rasterData,
             );
+            buildSharedChainsMs += result.timings.buildSharedChains;
+            extractLoopsMs += result.timings.extractLoops;
+            simplifyLoopsMs += result.timings.simplifyLoops;
+            finalizeShapeMs += result.timings.finalizeShape;
+            return result.shape;
         })
         .filter((part): part is ProjectedPartShape => part !== null)
         .sort((left, right) => right.depth - left.depth);
+    const buildTotalMs = performance.now() - buildStart;
+
+    recordPerfSample({
+        label: 'part-projection',
+        values: {
+            prepareParts: prepareMs,
+            rasterizeBatch: rasterMs,
+            buildSharedChains: buildSharedChainsMs,
+            extractLoops: extractLoopsMs,
+            simplifyLoops: simplifyLoopsMs,
+            finalizeShapes: finalizeShapeMs,
+            buildShapesTotal: buildTotalMs,
+            total: performance.now() - totalStart,
+        },
+    });
+
     return shapes;
 };

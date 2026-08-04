@@ -1,4 +1,5 @@
 import type { ProjectedPartShape, ProjectionOverlaySettings } from './partProjection';
+import { recordPerfSample } from './perfLogger';
 import { getSharedWebGpuContext } from './webgpuShared';
 
 type GPUCanvasContextLike = any;
@@ -210,13 +211,16 @@ export class GpuOverlayComposer {
         viewportHeight: number,
         settings: ProjectionOverlaySettings,
     ) {
+        const totalStart = performance.now();
         if (viewportWidth <= 0 || viewportHeight <= 0) {
             return false;
         }
 
+        const prepareStart = performance.now();
         const preparedShapes = shapes
             .map((shape) => buildPreparedShape(shape, viewportWidth, viewportHeight, settings))
             .filter((shape): shape is PreparedShape => shape !== null);
+        const prepareMs = performance.now() - prepareStart;
         if (preparedShapes.length === 0) {
             await this.clear(canvas, viewportWidth, viewportHeight);
             return false;
@@ -234,7 +238,11 @@ export class GpuOverlayComposer {
         this.ensureDepthTexture(device, canvas.width, canvas.height);
         this.ensurePipelines(device);
 
+        const resourceStart = performance.now();
         const resources = preparedShapes.map((shape) => this.createShapeResource(device, shape, viewportWidth, viewportHeight, settings));
+        const resourceMs = performance.now() - resourceStart;
+
+        const encodeStart = performance.now();
         const currentTexture = this.context!.getCurrentTexture();
         const commandEncoder = device.createCommandEncoder();
         const renderPass = commandEncoder.beginRenderPass({
@@ -262,7 +270,11 @@ export class GpuOverlayComposer {
         });
 
         renderPass.end();
+        const encodeMs = performance.now() - encodeStart;
+
+        const submitStart = performance.now();
         device.queue.submit([commandEncoder.finish()]);
+        const submitMs = performance.now() - submitStart;
 
         const frameResources = resources.flatMap((resource) => [
             resource.fillUniformBuffer,
@@ -275,6 +287,17 @@ export class GpuOverlayComposer {
             const disposables = this.pendingDisposables.get(renderId);
             this.pendingDisposables.delete(renderId);
             disposables?.forEach((resource) => resource.destroy());
+        });
+
+        recordPerfSample({
+            label: 'gpu-composer',
+            values: {
+                prepareShapes: prepareMs,
+                createResources: resourceMs,
+                encode: encodeMs,
+                submit: submitMs,
+                total: performance.now() - totalStart,
+            },
         });
 
         return true;
