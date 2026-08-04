@@ -7,6 +7,7 @@ export type ProjectionOverlaySettings = {
     enabled: boolean;
     simplifyEpsilon: number;
     strokeWidth: number;
+    showContours: boolean;
     opacity: number;
     minTriangleCount: number;
 };

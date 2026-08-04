@@ -282,6 +282,7 @@ function App() {
         enabled: true,
         simplifyEpsilon: 4,
         strokeWidth: 1.25,
+        showContours: true,
         opacity: 1,
         minTriangleCount: 40,
     });

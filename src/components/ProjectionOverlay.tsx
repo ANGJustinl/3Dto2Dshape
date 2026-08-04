@@ -8,6 +8,7 @@ import {
     type ProjectionMaskState,
     type ProjectionOverlaySettings,
 } from '../lib/partProjection';
+import { getGpuOverlayComposer } from '../lib/gpuOverlayComposer';
 import type { ProjectionPartSource } from '../lib/modelParts';
 import { getWebGpuScreenProjector } from '../lib/webgpuScreenProjector';
 
@@ -31,6 +32,7 @@ const ProjectionOverlay = forwardRef<ProjectionOverlayHandle>(function Projectio
     const canvasRef = useRef<HTMLCanvasElement | null>(null);
     const latestRequestIdRef = useRef(0);
     const composedCanvasRef = useRef<HTMLCanvasElement | null>(null);
+    const gpuOverlayComposerRef = useRef(getGpuOverlayComposer());
 
     const ensureHelperCanvas = (canvasRefValue: HTMLCanvasElement | null, width: number, height: number) => {
         const canvas = canvasRefValue ?? document.createElement('canvas');
@@ -258,9 +260,12 @@ const ProjectionOverlay = forwardRef<ProjectionOverlayHandle>(function Projectio
             }
         }
 
-        const strokeRadius = Math.max(1, Math.round(settings.strokeWidth));
+        const strokeRadius = settings.showContours ? Math.max(1, Math.round(settings.strokeWidth)) : 0;
         for (let y = 0; y < targetHeight; y += 1) {
             for (let x = 0; x < targetWidth; x += 1) {
+                if (strokeRadius <= 0) {
+                    continue;
+                }
                 const bufferIndex = y * targetWidth + x;
                 const ownerIndex = ownerBuffer[bufferIndex];
                 if (ownerIndex < 0) {
@@ -339,10 +344,10 @@ const ProjectionOverlay = forwardRef<ProjectionOverlayHandle>(function Projectio
                 return;
             }
 
+            const gpuOverlayComposer = gpuOverlayComposerRef.current;
+
             if (!settings.enabled) {
-                const context = canvas.getContext('2d');
-                context?.setTransform(1, 0, 0, 1, 0, 0);
-                context?.clearRect(0, 0, canvas.width, canvas.height);
+                void gpuOverlayComposer.clear(canvas, viewportWidth, viewportHeight);
                 return;
             }
 
@@ -394,7 +399,17 @@ const ProjectionOverlay = forwardRef<ProjectionOverlayHandle>(function Projectio
                     return;
                 }
 
-                drawShapes(canvas, shapes, viewportWidth, viewportHeight, settings);
+                const filteredShapes = filterSmallProjectedPartShapes(shapes);
+                const rendered = await gpuOverlayComposer.render(
+                    canvas,
+                    filteredShapes,
+                    viewportWidth,
+                    viewportHeight,
+                    settings,
+                );
+                if (!rendered) {
+                    drawShapes(canvas, shapes, viewportWidth, viewportHeight, settings);
+                }
             })();
 
         },

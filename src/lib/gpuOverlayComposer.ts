@@ -22,8 +22,10 @@ type IndexBufferResource = {
 
 type ShapeGpuResource = {
     depthBuffer: GPUBufferLike;
-    uniformBuffer: GPUBufferLike;
-    bindGroup: GPUBindGroupLike;
+    fillUniformBuffer: GPUBufferLike | null;
+    fillBindGroup: GPUBindGroupLike | null;
+    lineUniformBuffer: GPUBufferLike | null;
+    lineBindGroup: GPUBindGroupLike | null;
     fillVertexBuffer: VertexBufferResource | null;
     fillIndexBuffer: IndexBufferResource | null;
     lineVertexBuffer: VertexBufferResource | null;
@@ -189,8 +191,7 @@ export class GpuOverlayComposer {
 
         const filteredShapes = shapes.filter((shape) => shape.loops.length > 0);
         if (filteredShapes.length === 0) {
-            const context = canvas.getContext('2d');
-            context?.clearRect(0, 0, canvas.width, canvas.height);
+            await this.clear(canvas, viewportWidth, viewportHeight);
             return false;
         }
 
@@ -231,17 +232,17 @@ export class GpuOverlayComposer {
         });
 
         resources.forEach((resource) => {
-            if (resource.fillVertexBuffer && resource.fillIndexBuffer) {
+            if (resource.fillVertexBuffer && resource.fillIndexBuffer && resource.fillBindGroup) {
                 renderPass.setPipeline(this.fillPipeline);
-                renderPass.setBindGroup(0, resource.bindGroup);
+                renderPass.setBindGroup(0, resource.fillBindGroup);
                 renderPass.setVertexBuffer(0, resource.fillVertexBuffer.buffer);
                 renderPass.setIndexBuffer(resource.fillIndexBuffer.buffer, resource.fillIndexBuffer.format);
                 renderPass.drawIndexed(resource.fillIndexBuffer.indexCount);
             }
 
-            if (resource.lineVertexBuffer) {
+            if (resource.lineVertexBuffer && resource.lineBindGroup) {
                 renderPass.setPipeline(this.linePipeline);
-                renderPass.setBindGroup(0, resource.bindGroup);
+                renderPass.setBindGroup(0, resource.lineBindGroup);
                 renderPass.setVertexBuffer(0, resource.lineVertexBuffer.buffer);
                 renderPass.draw(resource.lineVertexBuffer.vertexCount);
             }
@@ -253,8 +254,13 @@ export class GpuOverlayComposer {
         const frameResources = resources.flatMap((resource) => {
             const disposables = [
                 resource.depthBuffer,
-                resource.uniformBuffer,
             ] as Array<{ destroy: () => void }>;
+            if (resource.fillUniformBuffer) {
+                disposables.push(resource.fillUniformBuffer);
+            }
+            if (resource.lineUniformBuffer) {
+                disposables.push(resource.lineUniformBuffer);
+            }
             if (resource.fillVertexBuffer) {
                 disposables.push(resource.fillVertexBuffer.buffer);
             }
@@ -275,6 +281,36 @@ export class GpuOverlayComposer {
         });
 
         return true;
+    }
+
+    async clear(canvas: HTMLCanvasElement, viewportWidth: number, viewportHeight: number) {
+        if (viewportWidth <= 0 || viewportHeight <= 0) {
+            return;
+        }
+
+        const device = await this.ensureDevice();
+        if (!device) {
+            const context = canvas.getContext('2d');
+            context?.setTransform(1, 0, 0, 1, 0, 0);
+            context?.clearRect(0, 0, canvas.width, canvas.height);
+            return;
+        }
+
+        this.configureCanvas(canvas, device, viewportWidth, viewportHeight);
+        const currentTexture = this.context!.getCurrentTexture();
+        const commandEncoder = device.createCommandEncoder();
+        const renderPass = commandEncoder.beginRenderPass({
+            colorAttachments: [
+                {
+                    view: currentTexture.createView(),
+                    clearValue: { r: 0, g: 0, b: 0, a: 0 },
+                    loadOp: 'clear',
+                    storeOp: 'store',
+                },
+            ],
+        });
+        renderPass.end();
+        device.queue.submit([commandEncoder.finish()]);
     }
 
     private async ensureDevice() {
@@ -512,7 +548,7 @@ fn fragmentMain(input: VertexOutput) -> FragmentOutput {
 
         shape.loops.forEach((loop) => {
             const fill = buildLoopTriangles(loop);
-            const lineVertices = buildStrokeTriangles(loop, settings.strokeWidth);
+            const lineVertices = settings.showContours ? buildStrokeTriangles(loop, settings.strokeWidth) : null;
             if (!fill && !lineVertices) {
                 return;
             }
@@ -522,34 +558,48 @@ fn fragmentMain(input: VertexOutput) -> FragmentOutput {
                 shape.depthField.values,
                 GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
             );
-            const uniformPayload = new Float32Array([
-                shape.depthField.offsetX,
-                shape.depthField.offsetY,
-                shape.depthField.width,
-                shape.depthField.height,
-                viewportWidth,
-                viewportHeight,
-                0,
-                0,
-                ...hexToRgba(shape.color),
-            ]);
-            const uniformBuffer = this.createBuffer(
-                device,
-                uniformPayload,
-                GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-            );
-            const bindGroup = device.createBindGroup({
-                layout: this.bindGroupLayout,
-                entries: [
-                    { binding: 0, resource: { buffer: depthBuffer } },
-                    { binding: 1, resource: { buffer: uniformBuffer } },
-                ],
-            });
+            const createUniformPayload = (color: [number, number, number, number]) =>
+                new Float32Array([
+                    shape.depthField.offsetX,
+                    shape.depthField.offsetY,
+                    shape.depthField.width,
+                    shape.depthField.height,
+                    viewportWidth,
+                    viewportHeight,
+                    0,
+                    0,
+                    ...color,
+                ]);
+            const createBindGroup = (uniformBuffer: GPUBufferLike) =>
+                device.createBindGroup({
+                    layout: this.bindGroupLayout,
+                    entries: [
+                        { binding: 0, resource: { buffer: depthBuffer } },
+                        { binding: 1, resource: { buffer: uniformBuffer } },
+                    ],
+                });
+
+            const fillUniformBuffer = fill
+                ? this.createBuffer(
+                      device,
+                      createUniformPayload(hexToRgba(shape.color)),
+                      GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+                  )
+                : null;
+            const lineUniformBuffer = lineVertices
+                ? this.createBuffer(
+                      device,
+                      createUniformPayload(EDGE_COLOR),
+                      GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+                  )
+                : null;
 
             resources.push({
                 depthBuffer,
-                uniformBuffer,
-                bindGroup,
+                fillUniformBuffer,
+                fillBindGroup: fillUniformBuffer ? createBindGroup(fillUniformBuffer) : null,
+                lineUniformBuffer,
+                lineBindGroup: lineUniformBuffer ? createBindGroup(lineUniformBuffer) : null,
                 fillVertexBuffer: fill
                     ? {
                           buffer: this.createBuffer(device, fill.vertices, GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST),
@@ -598,3 +648,10 @@ fn fragmentMain(input: VertexOutput) -> FragmentOutput {
         return buffer;
     }
 }
+
+let composer: GpuOverlayComposer | null = null;
+
+export const getGpuOverlayComposer = () => {
+    composer ??= new GpuOverlayComposer();
+    return composer;
+};

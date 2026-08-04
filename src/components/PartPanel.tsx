@@ -237,6 +237,18 @@ function PartPanel({
         >
           Overlay
         </button>
+        <button
+          type="button"
+          className={projectionSettings.showContours ? 'part-chip active' : 'part-chip'}
+          onClick={() =>
+            onProjectionSettingsChange({
+              ...projectionSettings,
+              showContours: !projectionSettings.showContours,
+            })
+          }
+        >
+          Contours
+        </button>
         <label className="projection-slider">
           <span>Simplify {projectionSettings.simplifyEpsilon.toFixed(1)}</span>
           <input
