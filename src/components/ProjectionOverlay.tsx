@@ -30,7 +30,6 @@ export type ProjectionOverlayHandle = {
 const ProjectionOverlay = forwardRef<ProjectionOverlayHandle>(function ProjectionOverlay(_, ref) {
     const canvasRef = useRef<HTMLCanvasElement | null>(null);
     const latestRequestIdRef = useRef(0);
-    const maskCanvasRef = useRef<HTMLCanvasElement | null>(null);
     const composedCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
     const ensureHelperCanvas = (canvasRefValue: HTMLCanvasElement | null, width: number, height: number) => {
@@ -40,6 +39,69 @@ const ProjectionOverlay = forwardRef<ProjectionOverlayHandle>(function Projectio
             canvas.height = height;
         }
         return canvas;
+    };
+
+    const buildLoopCoverageMask = (
+        shape: ProjectedPartShape,
+        bounds: { offsetX: number; offsetY: number; width: number; height: number },
+        simplifyEpsilon: number,
+    ) => {
+        if (simplifyEpsilon <= 0.001) {
+            return {
+                offsetX: shape.coverageMask.offsetX,
+                offsetY: shape.coverageMask.offsetY,
+                width: shape.coverageMask.width,
+                height: shape.coverageMask.height,
+                values: shape.coverageMask.values,
+            };
+        }
+
+        const mask = new Uint8Array(bounds.width * bounds.height);
+        const intersections: number[] = [];
+
+        for (let localY = 0; localY < bounds.height; localY += 1) {
+            intersections.length = 0;
+            const sampleY = bounds.offsetY + localY + 0.5;
+
+            shape.loops.forEach((loop) => {
+                for (let index = 0, previous = loop.length - 1; index < loop.length; previous = index, index += 1) {
+                    const current = loop[index];
+                    const prior = loop[previous];
+                    const crosses = (current.y > sampleY) !== (prior.y > sampleY);
+                    if (!crosses) {
+                        continue;
+                    }
+
+                    const intersectionX =
+                        ((prior.x - current.x) * (sampleY - current.y)) / (prior.y - current.y) + current.x;
+                    intersections.push(intersectionX);
+                }
+            });
+
+            if (intersections.length < 2) {
+                continue;
+            }
+
+            intersections.sort((left, right) => left - right);
+
+            for (let index = 0; index + 1 < intersections.length; index += 2) {
+                const startX = intersections[index];
+                const endX = intersections[index + 1];
+                const localStartX = Math.max(0, Math.ceil(startX - bounds.offsetX - 0.5));
+                const localEndX = Math.min(bounds.width - 1, Math.floor(endX - bounds.offsetX - 0.5));
+                for (let localX = localStartX; localX <= localEndX; localX += 1) {
+                    mask[localY * bounds.width + localX] = 1;
+                }
+            }
+        }
+
+        return {
+            offsetX: bounds.offsetX,
+            offsetY: bounds.offsetY,
+            width: bounds.width,
+            height: bounds.height,
+            values: mask,
+        };
     };
 
     const sampleDepthField = (
@@ -138,22 +200,10 @@ const ProjectionOverlay = forwardRef<ProjectionOverlayHandle>(function Projectio
             return false;
         }
 
-        const maxMaskWidth = preparedShapes.reduce(
-            (currentMax, preparedShape) => Math.max(currentMax, preparedShape.bounds.width),
-            1,
-        );
-        const maxMaskHeight = preparedShapes.reduce(
-            (currentMax, preparedShape) => Math.max(currentMax, preparedShape.bounds.height),
-            1,
-        );
-
-        maskCanvasRef.current = ensureHelperCanvas(maskCanvasRef.current, maxMaskWidth, maxMaskHeight);
         composedCanvasRef.current = ensureHelperCanvas(composedCanvasRef.current, targetWidth, targetHeight);
-        const maskCanvas = maskCanvasRef.current;
         const composedCanvas = composedCanvasRef.current;
-        const maskContext = maskCanvas.getContext('2d');
         const composedContext = composedCanvas.getContext('2d');
-        if (!maskContext || !composedContext) {
+        if (!composedContext) {
             return false;
         }
 
@@ -170,29 +220,16 @@ const ProjectionOverlay = forwardRef<ProjectionOverlayHandle>(function Projectio
         ownerBuffer.fill(-1);
 
         preparedShapes.forEach(({ shape, bounds }, shapeIndex) => {
-            maskContext.setTransform(1, 0, 0, 1, 0, 0);
-            maskContext.clearRect(0, 0, bounds.width, bounds.height);
-            maskContext.fillStyle = '#ffffff';
-            shape.loops.forEach((loop) => {
-                maskContext.beginPath();
-                maskContext.moveTo(loop[0].x - bounds.offsetX, loop[0].y - bounds.offsetY);
-                for (let index = 1; index < loop.length; index += 1) {
-                    maskContext.lineTo(loop[index].x - bounds.offsetX, loop[index].y - bounds.offsetY);
-                }
-                maskContext.closePath();
-                maskContext.fill();
-            });
-
-            const maskPixels = maskContext.getImageData(0, 0, bounds.width, bounds.height).data;
-            for (let localY = 0; localY < bounds.height; localY += 1) {
-                for (let localX = 0; localX < bounds.width; localX += 1) {
-                    const pixelOffset = (localY * bounds.width + localX) * 4 + 3;
-                    if (maskPixels[pixelOffset] === 0) {
+            const coverageMask = buildLoopCoverageMask(shape, bounds, settings.simplifyEpsilon);
+            for (let localY = 0; localY < coverageMask.height; localY += 1) {
+                const rowOffset = localY * coverageMask.width;
+                for (let localX = 0; localX < coverageMask.width; localX += 1) {
+                    if (coverageMask.values[rowOffset + localX] === 0) {
                         continue;
                     }
 
-                    const x = bounds.offsetX + localX;
-                    const y = bounds.offsetY + localY;
+                    const x = coverageMask.offsetX + localX;
+                    const y = coverageMask.offsetY + localY;
                     const depth = sampleDepthField(shape.depthField, x + 0.5, y + 0.5);
                     const bufferIndex = y * targetWidth + x;
                     if (depth < zBuffer[bufferIndex]) {

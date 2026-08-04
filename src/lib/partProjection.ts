@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { getGpuPartRasterizer, type GpuRasterizedPartData } from './gpuPartRasterizer';
 import type { ProjectionPartSource, ProjectionSharedChain } from './modelParts';
 import type { ProjectionFrameResult } from './webgpuScreenProjector';
 
@@ -21,6 +22,13 @@ export type ProjectedPartShape = {
         offsetX: number;
         offsetY: number;
         values: Float32Array;
+    };
+    coverageMask: {
+        width: number;
+        height: number;
+        offsetX: number;
+        offsetY: number;
+        values: Uint8Array;
     };
 };
 
@@ -415,6 +423,167 @@ const interpolateTriangleDepth = (
     const w1 = triangleSignedArea(point, triangle.points[2], triangle.points[0]) / area;
     const w2 = triangleSignedArea(point, triangle.points[0], triangle.points[1]) / area;
     return triangle.depths[0] * w0 + triangle.depths[1] * w1 + triangle.depths[2] * w2;
+};
+
+const buildDenseDepthField = (
+    projectedTriangles: ProjectedTriangle[],
+    bounds: MaskBounds,
+    fallbackDepth: number,
+) => {
+    const { width, height, offsetX, offsetY } = bounds;
+    const pixelCount = width * height;
+    const values = new Float32Array(pixelCount);
+    values.fill(Number.POSITIVE_INFINITY);
+    const valid = new Uint8Array(pixelCount);
+
+    for (let triangleIndex = 0; triangleIndex < projectedTriangles.length; triangleIndex += 1) {
+        const triangle = projectedTriangles[triangleIndex];
+        const point0 = triangle.points[0];
+        const point1 = triangle.points[1];
+        const point2 = triangle.points[2];
+        const depth0 = triangle.depths[0];
+        const depth1 = triangle.depths[1];
+        const depth2 = triangle.depths[2];
+
+        const localMinX = Math.max(0, Math.floor(Math.min(point0.x, point1.x, point2.x)) - offsetX);
+        const localMinY = Math.max(0, Math.floor(Math.min(point0.y, point1.y, point2.y)) - offsetY);
+        const localMaxX = Math.min(width - 1, Math.ceil(Math.max(point0.x, point1.x, point2.x)) - offsetX);
+        const localMaxY = Math.min(height - 1, Math.ceil(Math.max(point0.y, point1.y, point2.y)) - offsetY);
+        if (localMinX > localMaxX || localMinY > localMaxY) {
+            continue;
+        }
+
+        const area = triangleSignedArea(point0, point1, point2);
+        if (Math.abs(area) < 1e-5) {
+            const fallbackTriangleDepth = Math.min(depth0, depth1, depth2);
+            for (let y = localMinY; y <= localMaxY; y += 1) {
+                const sampleY = offsetY + y + 0.5;
+                const rowOffset = y * width;
+                for (let x = localMinX; x <= localMaxX; x += 1) {
+                    const sampleX = offsetX + x + 0.5;
+                    if (
+                        !isPointInTriangle(
+                            { x: sampleX, y: sampleY },
+                            point0,
+                            point1,
+                            point2,
+                        )
+                    ) {
+                        continue;
+                    }
+
+                    const pixelIndex = rowOffset + x;
+                    if (fallbackTriangleDepth < values[pixelIndex]) {
+                        values[pixelIndex] = fallbackTriangleDepth;
+                        valid[pixelIndex] = 1;
+                    }
+                }
+            }
+            continue;
+        }
+
+        const inverseArea = 1 / area;
+        for (let y = localMinY; y <= localMaxY; y += 1) {
+            const sampleY = offsetY + y + 0.5;
+            const rowOffset = y * width;
+            for (let x = localMinX; x <= localMaxX; x += 1) {
+                const sampleX = offsetX + x + 0.5;
+                const w0 = triangleSignedArea({ x: sampleX, y: sampleY }, point1, point2) * inverseArea;
+                const w1 = triangleSignedArea({ x: sampleX, y: sampleY }, point2, point0) * inverseArea;
+                const w2 = 1 - w0 - w1;
+                if (w0 < -1e-5 || w1 < -1e-5 || w2 < -1e-5) {
+                    continue;
+                }
+
+                const depth = depth0 * w0 + depth1 * w1 + depth2 * w2;
+                const pixelIndex = rowOffset + x;
+                if (depth < values[pixelIndex]) {
+                    values[pixelIndex] = depth;
+                    valid[pixelIndex] = 1;
+                }
+            }
+        }
+    }
+
+    const denseValues = new Float32Array(values);
+    const queue = new Int32Array(pixelCount);
+    let head = 0;
+    let tail = 0;
+    for (let index = 0; index < pixelCount; index += 1) {
+        if (valid[index] === 1) {
+            queue[tail] = index;
+            tail += 1;
+        }
+    }
+
+    if (tail === 0) {
+        denseValues.fill(fallbackDepth);
+    } else {
+        while (head < tail) {
+            const current = queue[head];
+            head += 1;
+            const x = current % width;
+            const y = Math.floor(current / width);
+
+            if (x > 0) {
+                const neighborIndex = current - 1;
+                if (valid[neighborIndex] === 0) {
+                    valid[neighborIndex] = 1;
+                    denseValues[neighborIndex] = denseValues[current];
+                    queue[tail] = neighborIndex;
+                    tail += 1;
+                }
+            }
+
+            if (x + 1 < width) {
+                const neighborIndex = current + 1;
+                if (valid[neighborIndex] === 0) {
+                    valid[neighborIndex] = 1;
+                    denseValues[neighborIndex] = denseValues[current];
+                    queue[tail] = neighborIndex;
+                    tail += 1;
+                }
+            }
+
+            if (y > 0) {
+                const neighborIndex = current - width;
+                if (valid[neighborIndex] === 0) {
+                    valid[neighborIndex] = 1;
+                    denseValues[neighborIndex] = denseValues[current];
+                    queue[tail] = neighborIndex;
+                    tail += 1;
+                }
+            }
+
+            if (y + 1 < height) {
+                const neighborIndex = current + width;
+                if (valid[neighborIndex] === 0) {
+                    valid[neighborIndex] = 1;
+                    denseValues[neighborIndex] = denseValues[current];
+                    queue[tail] = neighborIndex;
+                    tail += 1;
+                }
+            }
+        }
+    }
+
+    let nearestDepth = Number.POSITIVE_INFINITY;
+    denseValues.forEach((value) => {
+        if (value < nearestDepth) {
+            nearestDepth = value;
+        }
+    });
+
+    return {
+        depthField: {
+            width,
+            height,
+            offsetX,
+            offsetY,
+            values: denseValues,
+        },
+        nearestDepth,
+    };
 };
 
 
@@ -848,6 +1017,82 @@ const buildProjectedPartShape = (
         depth: rasterData.nearestDepth,
         loops,
         depthField: rasterData.depthField,
+        coverageMask: {
+            width: rasterData.width,
+            height: rasterData.height,
+            offsetX: rasterData.offsetX,
+            offsetY: rasterData.offsetY,
+            values: rasterData.occupied,
+        },
+    } satisfies ProjectedPartShape;
+};
+
+const buildProjectedPartShapeFromRasterData = (
+    part: ProjectionPartSource,
+    state: ProjectionMaskState,
+    projectionCache: MeshProjectionCache,
+    settings: ProjectionOverlaySettings,
+    rasterData: GpuRasterizedPartData,
+) => {
+    const projectedSharedChains = buildProjectedSharedChainsForPart(
+        part,
+        part.leafId,
+        state,
+        projectionCache,
+        {
+            width: rasterData.width,
+            height: rasterData.height,
+            offsetX: rasterData.offsetX,
+            offsetY: rasterData.offsetY,
+        },
+        settings.simplifyEpsilon,
+    );
+    const loops = extractLoopsFromMask(
+        rasterData.occupied,
+        rasterData.width,
+        rasterData.height,
+        rasterData.offsetX,
+        rasterData.offsetY,
+    )
+        .map((loop) =>
+            simplifyLoopByAnchorIndices(
+                loop,
+                collectContourAnchorIndices(
+                    loop,
+                    projectedSharedChains.mask,
+                    rasterData.width,
+                    rasterData.height,
+                    rasterData.offsetX,
+                    rasterData.offsetY,
+                ),
+                settings.simplifyEpsilon,
+                projectedSharedChains.mask,
+                projectedSharedChains.chains,
+                rasterData.width,
+                rasterData.height,
+                rasterData.offsetX,
+                rasterData.offsetY,
+            ),
+        )
+        .filter((loop) => loop.length >= 3 && Math.abs(polygonArea(loop)) > 6);
+
+    if (loops.length === 0) {
+        return null;
+    }
+
+    return {
+        leafId: part.leafId,
+        color: part.color,
+        depth: rasterData.nearestDepth,
+        loops,
+        depthField: rasterData.depthField,
+        coverageMask: {
+            width: rasterData.width,
+            height: rasterData.height,
+            offsetX: rasterData.offsetX,
+            offsetY: rasterData.offsetY,
+            values: rasterData.occupied,
+        },
     } satisfies ProjectedPartShape;
 };
 
@@ -906,7 +1151,7 @@ const collectProjectedPartShapesWithExactFrame = (
 };
 
 export const collectProjectedPartShapesForGpuFrame = (
-    _renderer: THREE.WebGLRenderer,
+    renderer: THREE.WebGLRenderer,
     parts: ProjectionPartSource[],
     state: ProjectionMaskState | null,
     settings: ProjectionOverlaySettings,
@@ -926,14 +1171,54 @@ export const collectProjectedPartShapesForGpuFrame = (
         return [];
     }
 
-    return filteredParts
+    const rasterizer = getGpuPartRasterizer();
+    const preparedParts = filteredParts
         .map((part) => {
             const projectionCache = frame.getProjectionCache(part.mesh);
             if (!projectionCache) {
                 return null;
             }
 
-            return buildProjectedPartShape(part, state, projectionCache, settings);
+            const fallbackDepth =
+                part.triangles[0]?.vertexIndices !== undefined
+                    ? (projectPointDepth(projectionCache, part.triangles[0].vertexIndices[0]) +
+                          projectPointDepth(projectionCache, part.triangles[0].vertexIndices[1]) +
+                          projectPointDepth(projectionCache, part.triangles[0].vertexIndices[2])) /
+                      3
+                    : Number.POSITIVE_INFINITY;
+
+            return {
+                part,
+                projectionCache,
+                fallbackDepth,
+            };
+        })
+        .filter(
+            (
+                preparedPart,
+            ): preparedPart is {
+                part: ProjectionPartSource;
+                projectionCache: MeshProjectionCache;
+                fallbackDepth: number;
+            } => preparedPart !== null,
+        );
+
+    const rasterResults = rasterizer.rasterizeBatch(renderer, preparedParts);
+
+    return preparedParts
+        .map((preparedPart, index) => {
+            const rasterData = rasterResults[index] ?? null;
+            if (!rasterData) {
+                return null;
+            }
+
+            return buildProjectedPartShapeFromRasterData(
+                preparedPart.part,
+                state,
+                preparedPart.projectionCache,
+                settings,
+                rasterData,
+            );
         })
         .filter((part): part is ProjectedPartShape => part !== null)
         .sort((left, right) => right.depth - left.depth);

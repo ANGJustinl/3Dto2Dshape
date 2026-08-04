@@ -195,6 +195,8 @@ class GpuPartRasterizer {
             depthWrite: true,
             transparent: false,
             blending: THREE.NoBlending,
+            toneMapped: false,
+            dithering: false,
             vertexShader: `
 precision highp float;
 precision highp int;
@@ -235,6 +237,7 @@ void main() {
 }
             `,
         });
+        this.target.texture.colorSpace = THREE.NoColorSpace;
         this.mesh = new THREE.Mesh(new THREE.BufferGeometry(), material);
         this.mesh.frustumCulled = false;
         this.mesh.matrixAutoUpdate = false;
@@ -369,7 +372,7 @@ void main() {
         let nearestDepth = Number.POSITIVE_INFINITY;
 
         for (let localY = 0; localY < bounds.height; localY += 1) {
-            const atlasRow = atlasHeight - 1 - (atlasY + localY);
+            const atlasRow = atlasY + (bounds.height - 1 - localY);
             for (let localX = 0; localX < bounds.width; localX += 1) {
                 const sourceOffset = (atlasRow * atlasWidth + (atlasX + localX)) * 4;
                 const red = this.pixelBuffer[sourceOffset];
