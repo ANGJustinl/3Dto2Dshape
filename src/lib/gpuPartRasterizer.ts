@@ -1,27 +1,32 @@
-import * as THREE from 'three';
 import type { ProjectionPartSource } from './modelParts';
 import type { MeshProjectionCache } from './partProjection';
+import { getSharedWebGpuContext } from './webgpuShared';
+
+type GPUBufferLike = any;
+type GPUComputePipelineLike = any;
+type GPUDeviceLike = any;
+type GPUBindGroupLike = any;
+type GPUTextureLike = any;
 
 export type GpuRasterizedPartData = {
     occupied: Uint8Array;
-    depthField: {
-        width: number;
-        height: number;
-        offsetX: number;
-        offsetY: number;
-        values: Float32Array;
-    };
+    depthValues: Float32Array;
     nearestDepth: number;
     width: number;
     height: number;
     offsetX: number;
     offsetY: number;
+    atlasX: number;
+    atlasY: number;
+    atlasWidth: number;
+    atlasHeight: number;
 };
 
-type PartGeometryResource = {
-    geometry: THREE.BufferGeometry;
-    positionAttribute: THREE.BufferAttribute;
-    sourceVertexIndices: Int32Array;
+export type GpuRasterAtlasState = {
+    maskTexture: GPUTextureLike;
+    texture: GPUTextureLike;
+    atlasWidth: number;
+    atlasHeight: number;
 };
 
 type PartBounds = {
@@ -39,26 +44,26 @@ type RasterizeRequest = {
 
 type PreparedRequest = RasterizeRequest & {
     bounds: PartBounds;
-    resource: PartGeometryResource;
     atlasX: number;
     atlasY: number;
+    nearestDepth: number;
+    triangleData: Float32Array;
 };
 
-const DEPTH_PACK_EPSILON = 1 / 16777216;
+const WORKGROUP_SIZE = 8;
 const ATLAS_PADDING = 1;
+const MASK_FORMAT = 'rgba8unorm';
+const DEPTH_FORMAT = 'r32float';
 
-const unpackDepthFromRgba = (red: number, green: number, blue: number, alpha: number) => {
-    const normalizedRed = red / 255;
-    const normalizedGreen = green / 255;
-    const normalizedBlue = blue / 255;
-    const normalizedAlpha = alpha / 255;
-    return (
-        normalizedRed / (256 * 256 * 256) +
-        normalizedGreen / (256 * 256) +
-        normalizedBlue / 256 +
-        normalizedAlpha
-    );
-};
+const GPUBufferUsageStorage = 0x0080;
+const GPUBufferUsageUniform = 0x0040;
+const GPUBufferUsageCopyDst = 0x0008;
+const GPUBufferUsageMapRead = 0x0001;
+const GPUTextureUsageStorageBinding = 0x0008;
+const GPUTextureUsageTextureBinding = 0x0004;
+const GPUTextureUsageCopySrc = 0x0001;
+
+const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
 
 const computePartBounds = (
     part: ProjectionPartSource,
@@ -102,161 +107,23 @@ const computePartBounds = (
     } satisfies PartBounds;
 };
 
-const fillDenseDepthField = (
-    width: number,
-    height: number,
-    offsetX: number,
-    offsetY: number,
-    occupied: Uint8Array,
-    sparseDepth: Float32Array,
-    fallbackDepth: number,
-) => {
-    const denseValues = new Float32Array(sparseDepth);
-    const valid = new Uint8Array(width * height);
-    const queue = new Int32Array(width * height);
-    let head = 0;
-    let tail = 0;
-
-    for (let index = 0; index < occupied.length; index += 1) {
-        if (occupied[index] === 1) {
-            valid[index] = 1;
-            queue[tail] = index;
-            tail += 1;
-        }
-    }
-
-    if (tail === 0) {
-        denseValues.fill(fallbackDepth);
-        return {
-            width,
-            height,
-            offsetX,
-            offsetY,
-            values: denseValues,
-        };
-    }
-
-    while (head < tail) {
-        const current = queue[head];
-        head += 1;
-        const x = current % width;
-        const y = Math.floor(current / width);
-        const neighbors: Array<[number, number]> = [
-            [x - 1, y],
-            [x + 1, y],
-            [x, y - 1],
-            [x, y + 1],
-        ];
-
-        neighbors.forEach(([neighborX, neighborY]) => {
-            if (neighborX < 0 || neighborY < 0 || neighborX >= width || neighborY >= height) {
-                return;
-            }
-
-            const neighborIndex = neighborY * width + neighborX;
-            if (valid[neighborIndex] === 1) {
-                return;
-            }
-
-            valid[neighborIndex] = 1;
-            denseValues[neighborIndex] = denseValues[current];
-            queue[tail] = neighborIndex;
-            tail += 1;
-        });
-    }
-
-    return {
-        width,
-        height,
-        offsetX,
-        offsetY,
-        values: denseValues,
-    };
-};
-
 class GpuPartRasterizer {
-    private scene = new THREE.Scene();
-    private camera = new THREE.Camera();
-    private target = new THREE.WebGLRenderTarget(1, 1, {
-        depthBuffer: true,
-        stencilBuffer: false,
-        magFilter: THREE.NearestFilter,
-        minFilter: THREE.NearestFilter,
-        format: THREE.RGBAFormat,
-        type: THREE.UnsignedByteType,
-    });
-    private mesh: THREE.Mesh;
-    private resourcesByLeafId = new Map<string, PartGeometryResource>();
-    private pixelBuffer = new Uint8Array(4);
+    private devicePromise: Promise<GPUDeviceLike | null> | null = null;
+    private pipeline: GPUComputePipelineLike | null = null;
+    private bindGroupLayout: any = null;
+    private maskTexture: GPUTextureLike | null = null;
+    private depthTexture: GPUTextureLike | null = null;
+    private atlasWidth = 1;
+    private atlasHeight = 1;
 
-    constructor() {
-        const material = new THREE.ShaderMaterial({
-            depthTest: true,
-            depthWrite: true,
-            transparent: false,
-            blending: THREE.NoBlending,
-            toneMapped: false,
-            dithering: false,
-            vertexShader: `
-precision highp float;
-precision highp int;
+    async rasterizeBatch(requests: RasterizeRequest[]) {
+        const device = await this.getDevice();
+        if (!device) {
+            return [] as Array<GpuRasterizedPartData | null>;
+        }
 
-varying float vPackedDepth;
-
-void main() {
-    gl_Position = vec4(position, 1.0);
-    vPackedDepth = clamp(position.z * 0.5 + 0.5, ${DEPTH_PACK_EPSILON.toFixed(12)}, 1.0);
-}
-            `,
-            fragmentShader: `
-precision highp float;
-precision highp int;
-
-varying float vPackedDepth;
-
-vec4 packDepthToRGBA(const in float value) {
-    vec4 bitShift = vec4(
-        256.0 * 256.0 * 256.0,
-        256.0 * 256.0,
-        256.0,
-        1.0
-    );
-    vec4 bitMask = vec4(
-        0.0,
-        1.0 / 256.0,
-        1.0 / 256.0,
-        1.0 / 256.0
-    );
-    vec4 packed = fract(value * bitShift);
-    packed -= packed.xxyz * bitMask;
-    return packed;
-}
-
-void main() {
-    gl_FragColor = packDepthToRGBA(vPackedDepth);
-}
-            `,
-        });
-        this.target.texture.colorSpace = THREE.NoColorSpace;
-        this.mesh = new THREE.Mesh(new THREE.BufferGeometry(), material);
-        this.mesh.frustumCulled = false;
-        this.mesh.matrixAutoUpdate = false;
-        this.mesh.updateMatrix();
-        this.scene.add(this.mesh);
-    }
-
-    dispose() {
-        this.target.dispose();
-        this.mesh.geometry.dispose();
-        (this.mesh.material as THREE.Material).dispose();
-        this.resourcesByLeafId.forEach((resource) => {
-            resource.geometry.dispose();
-        });
-        this.resourcesByLeafId.clear();
-    }
-
-    rasterizeBatch(renderer: THREE.WebGLRenderer, requests: RasterizeRequest[]) {
-        const preparedRequests = this.prepareRequests(renderer, requests);
+        this.ensurePipeline(device);
+        const preparedRequests = this.prepareRequests(requests);
         if (preparedRequests.length === 0) {
             return [] as Array<GpuRasterizedPartData | null>;
         }
@@ -269,62 +136,246 @@ void main() {
             (currentMax, request) => Math.max(currentMax, request.atlasY + request.bounds.height),
             1,
         );
+        this.ensureAtlasTextures(device, atlasWidth, atlasHeight);
 
-        if (this.target.width !== atlasWidth || this.target.height !== atlasHeight) {
-            this.target.setSize(atlasWidth, atlasHeight);
-        }
-
-        const pixelCount = atlasWidth * atlasHeight * 4;
-        if (this.pixelBuffer.length !== pixelCount) {
-            this.pixelBuffer = new Uint8Array(pixelCount);
-        }
-
-        const previousTarget = renderer.getRenderTarget();
-        const previousAutoClear = renderer.autoClear;
-        const previousScissorTest = renderer.getScissorTest();
-        const previousViewport = new THREE.Vector4();
-        const previousScissor = new THREE.Vector4();
-        const previousClearColor = new THREE.Color();
-        renderer.getViewport(previousViewport);
-        renderer.getScissor(previousScissor);
-        renderer.getClearColor(previousClearColor);
-        const previousClearAlpha = renderer.getClearAlpha();
-
-        renderer.autoClear = false;
-        renderer.setRenderTarget(this.target);
-        renderer.setClearColor(0x000000, 0);
-        renderer.setScissorTest(false);
-        renderer.clear(true, true, true);
-        renderer.setScissorTest(true);
+        const commandEncoder = device.createCommandEncoder();
+        const computePass = commandEncoder.beginComputePass();
+        computePass.setPipeline(this.pipeline);
 
         preparedRequests.forEach((request) => {
-            renderer.setViewport(request.atlasX, request.atlasY, request.bounds.width, request.bounds.height);
-            renderer.setScissor(request.atlasX, request.atlasY, request.bounds.width, request.bounds.height);
-            this.mesh.geometry = request.resource.geometry;
-            renderer.render(this.scene, this.camera);
+            const triangleBuffer = this.createBuffer(device, request.triangleData, GPUBufferUsageStorage | GPUBufferUsageCopyDst);
+            const uniformBuffer = this.createBuffer(
+                device,
+                new Float32Array([
+                    request.bounds.offsetX,
+                    request.bounds.offsetY,
+                    request.bounds.width,
+                    request.bounds.height,
+                    request.atlasX,
+                    request.atlasY,
+                    atlasWidth,
+                    atlasHeight,
+                    request.triangleData.length / 12,
+                    request.fallbackDepth,
+                    0,
+                    0,
+                ]),
+                GPUBufferUsageUniform | GPUBufferUsageCopyDst,
+            );
+            const bindGroup = device.createBindGroup({
+                layout: this.bindGroupLayout,
+                entries: [
+                    { binding: 0, resource: { buffer: triangleBuffer } },
+                    { binding: 1, resource: { buffer: uniformBuffer } },
+                    { binding: 2, resource: this.maskTexture.createView() },
+                    { binding: 3, resource: this.depthTexture.createView() },
+                ],
+            });
+
+            computePass.setBindGroup(0, bindGroup);
+            computePass.dispatchWorkgroups(
+                Math.ceil(request.bounds.width / WORKGROUP_SIZE),
+                Math.ceil(request.bounds.height / WORKGROUP_SIZE),
+            );
         });
 
-        renderer.readRenderTargetPixels(this.target, 0, 0, atlasWidth, atlasHeight, this.pixelBuffer);
+        computePass.end();
 
-        renderer.setRenderTarget(previousTarget);
-        renderer.setViewport(previousViewport);
-        renderer.setScissor(previousScissor);
-        renderer.setScissorTest(previousScissorTest);
-        renderer.setClearColor(previousClearColor, previousClearAlpha);
-        renderer.autoClear = previousAutoClear;
-
-        return requests.map((request) => {
-            const preparedRequest = preparedRequests.find((candidate) => candidate.part.leafId === request.part.leafId);
-            if (!preparedRequest) {
-                return null;
-            }
-            return this.extractRasterizedData(atlasWidth, atlasHeight, preparedRequest);
+        const maskBytesPerRow = Math.ceil((atlasWidth * 4) / 256) * 256;
+        const maskReadbackBuffer = device.createBuffer({
+            size: maskBytesPerRow * atlasHeight,
+            usage: GPUBufferUsageMapRead | GPUBufferUsageCopyDst,
         });
+        const depthBytesPerRow = Math.ceil((atlasWidth * Float32Array.BYTES_PER_ELEMENT) / 256) * 256;
+        const depthReadbackBuffer = device.createBuffer({
+            size: depthBytesPerRow * atlasHeight,
+            usage: GPUBufferUsageMapRead | GPUBufferUsageCopyDst,
+        });
+        commandEncoder.copyTextureToBuffer(
+            { texture: this.maskTexture },
+            { buffer: maskReadbackBuffer, bytesPerRow: maskBytesPerRow, rowsPerImage: atlasHeight },
+            { width: atlasWidth, height: atlasHeight, depthOrArrayLayers: 1 },
+        );
+        commandEncoder.copyTextureToBuffer(
+            { texture: this.depthTexture },
+            { buffer: depthReadbackBuffer, bytesPerRow: depthBytesPerRow, rowsPerImage: atlasHeight },
+            { width: atlasWidth, height: atlasHeight, depthOrArrayLayers: 1 },
+        );
+
+        device.queue.submit([commandEncoder.finish()]);
+        await Promise.all([maskReadbackBuffer.mapAsync(1), depthReadbackBuffer.mapAsync(1)]);
+        const maskPixels = new Uint8Array(maskReadbackBuffer.getMappedRange().slice(0));
+        const depthPixels = new Float32Array(depthReadbackBuffer.getMappedRange().slice(0));
+        maskReadbackBuffer.unmap();
+        depthReadbackBuffer.unmap();
+        maskReadbackBuffer.destroy();
+        depthReadbackBuffer.destroy();
+
+        const results = preparedRequests.map((request) =>
+            this.extractRasterizedData(
+                maskPixels,
+                maskBytesPerRow,
+                depthPixels,
+                depthBytesPerRow / Float32Array.BYTES_PER_ELEMENT,
+                request,
+                atlasWidth,
+                atlasHeight,
+            ),
+        );
+        return results;
     }
 
-    private prepareRequests(renderer: THREE.WebGLRenderer, requests: RasterizeRequest[]) {
-        const maxTextureSize = renderer.capabilities.maxTextureSize;
-        const atlasMaxWidth = Math.max(256, Math.min(2048, maxTextureSize));
+    getDepthAtlasState() {
+        if (!this.maskTexture || !this.depthTexture) {
+            return null;
+        }
+
+        return {
+            maskTexture: this.maskTexture,
+            texture: this.depthTexture,
+            atlasWidth: this.atlasWidth,
+            atlasHeight: this.atlasHeight,
+        } satisfies GpuRasterAtlasState;
+    }
+
+    private async getDevice() {
+        if (!this.devicePromise) {
+            this.devicePromise = getSharedWebGpuContext().getDevice();
+        }
+        return this.devicePromise;
+    }
+
+    private ensurePipeline(device: GPUDeviceLike) {
+        if (this.pipeline) {
+            return;
+        }
+
+        this.pipeline = device.createComputePipeline({
+            layout: 'auto',
+            compute: {
+                module: device.createShaderModule({
+                    code: `
+struct Uniforms {
+    offsetX: f32,
+    offsetY: f32,
+    width: f32,
+    height: f32,
+    atlasX: f32,
+    atlasY: f32,
+    atlasWidth: f32,
+    atlasHeight: f32,
+    triangleCount: f32,
+    fallbackDepth: f32,
+    padding0: vec2<f32>,
+}
+
+@group(0) @binding(0) var<storage, read> triangles: array<vec4<f32>>;
+@group(0) @binding(1) var<uniform> uniforms: Uniforms;
+@group(0) @binding(2) var maskAtlas: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(3) var depthAtlas: texture_storage_2d<r32float, write>;
+
+fn triangleSignedArea(a: vec2<f32>, b: vec2<f32>, c: vec2<f32>) -> f32 {
+    return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+}
+
+fn isPointInTriangle(point: vec2<f32>, a: vec2<f32>, b: vec2<f32>, c: vec2<f32>) -> bool {
+    let area0 = triangleSignedArea(point, a, b);
+    let area1 = triangleSignedArea(point, b, c);
+    let area2 = triangleSignedArea(point, c, a);
+    let hasNegative = area0 < 0.0 || area1 < 0.0 || area2 < 0.0;
+    let hasPositive = area0 > 0.0 || area1 > 0.0 || area2 > 0.0;
+    return !(hasNegative && hasPositive);
+}
+
+fn interpolateDepth(point: vec2<f32>, a: vec2<f32>, b: vec2<f32>, c: vec2<f32>, da: f32, db: f32, dc: f32) -> f32 {
+    let area = triangleSignedArea(a, b, c);
+    if (abs(area) < 0.00001) {
+        return min(da, min(db, dc));
+    }
+    let w0 = triangleSignedArea(point, b, c) / area;
+    let w1 = triangleSignedArea(point, c, a) / area;
+    let w2 = triangleSignedArea(point, a, b) / area;
+    return da * w0 + db * w1 + dc * w2;
+}
+
+@compute @workgroup_size(${WORKGROUP_SIZE}, ${WORKGROUP_SIZE}, 1)
+fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
+    if (f32(globalId.x) >= uniforms.width || f32(globalId.y) >= uniforms.height) {
+        return;
+    }
+
+    let samplePoint = vec2<f32>(
+        uniforms.offsetX + f32(globalId.x) + 0.5,
+        uniforms.offsetY + f32(globalId.y) + 0.5
+    );
+    var occupied = false;
+    var bestDepth = 1e20;
+
+    for (var triangleIndex = 0u; triangleIndex < u32(uniforms.triangleCount); triangleIndex += 1u) {
+        let base = triangleIndex * 3u;
+        let t0 = triangles[base];
+        let t1 = triangles[base + 1u];
+        let t2 = triangles[base + 2u];
+        let p0 = t0.xy;
+        let p1 = t1.xy;
+        let p2 = t2.xy;
+        if (!isPointInTriangle(samplePoint, p0, p1, p2)) {
+            continue;
+        }
+
+        let depth = interpolateDepth(samplePoint, p0, p1, p2, t0.z, t1.z, t2.z);
+        if (depth < bestDepth) {
+            bestDepth = depth;
+        }
+        occupied = true;
+    }
+
+    let atlasCoord = vec2<i32>(i32(uniforms.atlasX) + i32(globalId.x), i32(uniforms.atlasY) + i32(globalId.y));
+    if (occupied) {
+        textureStore(maskAtlas, atlasCoord, vec4<f32>(1.0, 1.0, 1.0, 1.0));
+        textureStore(depthAtlas, atlasCoord, vec4<f32>(bestDepth, 0.0, 0.0, 0.0));
+    } else {
+        textureStore(maskAtlas, atlasCoord, vec4<f32>(0.0));
+        textureStore(depthAtlas, atlasCoord, vec4<f32>(1e20, 0.0, 0.0, 0.0));
+    }
+}
+                    `,
+                }),
+                entryPoint: 'main',
+            },
+        });
+        this.bindGroupLayout = this.pipeline.getBindGroupLayout(0);
+    }
+
+    private ensureAtlasTextures(device: GPUDeviceLike, atlasWidth: number, atlasHeight: number) {
+        if (
+            this.maskTexture &&
+            this.depthTexture &&
+            this.atlasWidth === atlasWidth &&
+            this.atlasHeight === atlasHeight
+        ) {
+            return;
+        }
+
+        this.maskTexture?.destroy();
+        this.depthTexture?.destroy();
+
+        this.maskTexture = device.createTexture({
+            size: { width: atlasWidth, height: atlasHeight, depthOrArrayLayers: 1 },
+            format: MASK_FORMAT,
+            usage: GPUTextureUsageStorageBinding | GPUTextureUsageTextureBinding | GPUTextureUsageCopySrc,
+        });
+        this.depthTexture = device.createTexture({
+            size: { width: atlasWidth, height: atlasHeight, depthOrArrayLayers: 1 },
+            format: DEPTH_FORMAT,
+            usage: GPUTextureUsageStorageBinding | GPUTextureUsageTextureBinding | GPUTextureUsageCopySrc,
+        });
+        this.atlasWidth = atlasWidth;
+        this.atlasHeight = atlasHeight;
+    }
+
+    private prepareRequests(requests: RasterizeRequest[]) {
+        const atlasMaxWidth = 2048;
         const preparedRequests: PreparedRequest[] = [];
         let cursorX = 0;
         let cursorY = 0;
@@ -336,8 +387,17 @@ void main() {
                 return;
             }
 
-            const resource = this.ensureResource(request.part);
-            this.updatePositions(resource, request.projectionCache, bounds);
+            const triangleData = new Float32Array(request.part.triangles.length * 12);
+            let offset = 0;
+            request.part.triangles.forEach((triangle) => {
+                triangle.vertexIndices.forEach((vertexIndex) => {
+                    triangleData[offset] = request.projectionCache.screenX[vertexIndex];
+                    triangleData[offset + 1] = request.projectionCache.screenY[vertexIndex];
+                    triangleData[offset + 2] = request.projectionCache.depth[vertexIndex];
+                    triangleData[offset + 3] = 0;
+                    offset += 4;
+                });
+            });
 
             if (cursorX > 0 && cursorX + bounds.width > atlasMaxWidth) {
                 cursorX = 0;
@@ -348,9 +408,10 @@ void main() {
             preparedRequests.push({
                 ...request,
                 bounds,
-                resource,
                 atlasX: cursorX,
                 atlasY: cursorY,
+                nearestDepth: this.computeNearestDepth(request.part, request.projectionCache, request.fallbackDepth),
+                triangleData,
             });
 
             cursorX += bounds.width + ATLAS_PADDING;
@@ -361,111 +422,69 @@ void main() {
     }
 
     private extractRasterizedData(
+        maskPixels: Uint8Array,
+        maskBytesPerRow: number,
+        depthPixels: Float32Array,
+        depthRowStride: number,
+        request: PreparedRequest,
         atlasWidth: number,
         atlasHeight: number,
-        request: PreparedRequest,
-    ): GpuRasterizedPartData {
-        const { bounds, fallbackDepth, atlasX, atlasY } = request;
-        const occupied = new Uint8Array(bounds.width * bounds.height);
-        const sparseDepth = new Float32Array(bounds.width * bounds.height);
-        sparseDepth.fill(fallbackDepth);
-        let nearestDepth = Number.POSITIVE_INFINITY;
+    ) {
+        const occupied = new Uint8Array(request.bounds.width * request.bounds.height);
+        const depthValues = new Float32Array(request.bounds.width * request.bounds.height);
+        depthValues.fill(Number.POSITIVE_INFINITY);
 
-        for (let localY = 0; localY < bounds.height; localY += 1) {
-            const atlasRow = atlasY + (bounds.height - 1 - localY);
-            for (let localX = 0; localX < bounds.width; localX += 1) {
-                const sourceOffset = (atlasRow * atlasWidth + (atlasX + localX)) * 4;
-                const red = this.pixelBuffer[sourceOffset];
-                const green = this.pixelBuffer[sourceOffset + 1];
-                const blue = this.pixelBuffer[sourceOffset + 2];
-                const alpha = this.pixelBuffer[sourceOffset + 3];
-                const hasCoverage = red !== 0 || green !== 0 || blue !== 0 || alpha !== 0;
-                if (!hasCoverage) {
+        for (let localY = 0; localY < request.bounds.height; localY += 1) {
+            const atlasRow = request.atlasY + localY;
+            for (let localX = 0; localX < request.bounds.width; localX += 1) {
+                const sourceOffset = atlasRow * maskBytesPerRow + (request.atlasX + localX) * 4;
+                const targetIndex = localY * request.bounds.width + localX;
+                if (maskPixels[sourceOffset + 3] === 0) {
                     continue;
                 }
-
-                const depth01 = unpackDepthFromRgba(red, green, blue, alpha);
-                const ndcDepth = depth01 * 2 - 1;
-                const pixelIndex = localY * bounds.width + localX;
-                occupied[pixelIndex] = 1;
-                sparseDepth[pixelIndex] = ndcDepth;
-                if (ndcDepth < nearestDepth) {
-                    nearestDepth = ndcDepth;
-                }
+                occupied[targetIndex] = 1;
+                depthValues[targetIndex] = depthPixels[atlasRow * depthRowStride + request.atlasX + localX];
             }
         }
 
-        const depthField = fillDenseDepthField(
-            bounds.width,
-            bounds.height,
-            bounds.offsetX,
-            bounds.offsetY,
-            occupied,
-            sparseDepth,
-            fallbackDepth,
-        );
-
         return {
             occupied,
-            depthField,
-            nearestDepth,
-            width: bounds.width,
-            height: bounds.height,
-            offsetX: bounds.offsetX,
-            offsetY: bounds.offsetY,
-        };
+            depthValues,
+            nearestDepth: request.nearestDepth,
+            width: request.bounds.width,
+            height: request.bounds.height,
+            offsetX: request.bounds.offsetX,
+            offsetY: request.bounds.offsetY,
+            atlasX: request.atlasX,
+            atlasY: request.atlasY,
+            atlasWidth,
+            atlasHeight,
+        } satisfies GpuRasterizedPartData;
     }
 
-    private ensureResource(part: ProjectionPartSource) {
-        const existing = this.resourcesByLeafId.get(part.leafId);
-        const vertexCount = part.triangles.length * 3;
-        if (existing && existing.positionAttribute.count === vertexCount) {
-            return existing;
-        }
-
-        existing?.geometry.dispose();
-
-        const positions = new Float32Array(vertexCount * 3);
-        const sourceVertexIndices = new Int32Array(vertexCount);
-        part.triangles.forEach((triangle, triangleIndex) => {
-            triangle.vertexIndices.forEach((vertexIndex, cornerIndex) => {
-                sourceVertexIndices[triangleIndex * 3 + cornerIndex] = vertexIndex;
+    private computeNearestDepth(
+        part: ProjectionPartSource,
+        projectionCache: MeshProjectionCache,
+        fallbackDepth: number,
+    ) {
+        let nearestDepth = Number.POSITIVE_INFINITY;
+        part.triangles.forEach((triangle) => {
+            triangle.vertexIndices.forEach((vertexIndex) => {
+                nearestDepth = Math.min(nearestDepth, projectionCache.depth[vertexIndex]);
             });
         });
-
-        const geometry = new THREE.BufferGeometry();
-        const positionAttribute = new THREE.BufferAttribute(positions, 3);
-        geometry.setAttribute('position', positionAttribute);
-
-        const resource = {
-            geometry,
-            positionAttribute,
-            sourceVertexIndices,
-        };
-        this.resourcesByLeafId.set(part.leafId, resource);
-        return resource;
+        return Number.isFinite(nearestDepth) ? nearestDepth : fallbackDepth;
     }
 
-    private updatePositions(
-        resource: PartGeometryResource,
-        projectionCache: MeshProjectionCache,
-        bounds: PartBounds,
-    ) {
-        for (let index = 0; index < resource.sourceVertexIndices.length; index += 1) {
-            const sourceVertexIndex = resource.sourceVertexIndices[index];
-            const screenX = projectionCache.screenX[sourceVertexIndex];
-            const screenY = projectionCache.screenY[sourceVertexIndex];
-            const depth = projectionCache.depth[sourceVertexIndex];
-            const localX = (screenX - bounds.offsetX) / bounds.width;
-            const localY = (screenY - bounds.offsetY) / bounds.height;
-            resource.positionAttribute.setXYZ(
-                index,
-                localX * 2 - 1,
-                1 - localY * 2,
-                depth,
-            );
-        }
-        resource.positionAttribute.needsUpdate = true;
+    private createBuffer(device: GPUDeviceLike, data: Float32Array, usage: number) {
+        const buffer = device.createBuffer({
+            size: data.byteLength,
+            usage,
+            mappedAtCreation: true,
+        });
+        new Float32Array(buffer.getMappedRange()).set(data);
+        buffer.unmap();
+        return buffer;
     }
 }
 

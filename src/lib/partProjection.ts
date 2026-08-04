@@ -17,13 +17,26 @@ export type ProjectedPartShape = {
     color: string;
     depth: number;
     loops: Array<Array<{ x: number; y: number }>>;
-    depthField: {
-        width: number;
-        height: number;
-        offsetX: number;
-        offsetY: number;
-        values: Float32Array;
-    };
+    depthField:
+        | {
+              kind: 'cpu';
+              width: number;
+              height: number;
+              offsetX: number;
+              offsetY: number;
+              values: Float32Array;
+          }
+        | {
+              kind: 'gpu';
+              width: number;
+              height: number;
+              offsetX: number;
+              offsetY: number;
+              atlasX: number;
+              atlasY: number;
+              atlasWidth: number;
+              atlasHeight: number;
+          };
     coverageMask: {
         width: number;
         height: number;
@@ -397,6 +410,7 @@ const buildProjectedRasterData = (
     return {
         occupied,
         depthField: {
+            kind: 'cpu',
             width,
             height,
             offsetX,
@@ -577,6 +591,7 @@ const buildDenseDepthField = (
 
     return {
         depthField: {
+            kind: 'cpu',
             width,
             height,
             offsetX,
@@ -1017,7 +1032,14 @@ const buildProjectedPartShape = (
         color: part.color,
         depth: rasterData.nearestDepth,
         loops,
-        depthField: rasterData.depthField,
+        depthField: {
+            kind: 'cpu',
+            width: rasterData.width,
+            height: rasterData.height,
+            offsetX: rasterData.offsetX,
+            offsetY: rasterData.offsetY,
+            values: rasterData.depthField.values,
+        },
         coverageMask: {
             width: rasterData.width,
             height: rasterData.height,
@@ -1086,7 +1108,14 @@ const buildProjectedPartShapeFromRasterData = (
         color: part.color,
         depth: rasterData.nearestDepth,
         loops,
-        depthField: rasterData.depthField,
+        depthField: {
+            kind: 'cpu',
+            width: rasterData.width,
+            height: rasterData.height,
+            offsetX: rasterData.offsetX,
+            offsetY: rasterData.offsetY,
+            values: rasterData.depthValues,
+        },
         coverageMask: {
             width: rasterData.width,
             height: rasterData.height,
@@ -1151,8 +1180,7 @@ const collectProjectedPartShapesWithExactFrame = (
         .sort((left, right) => right.depth - left.depth);
 };
 
-export const collectProjectedPartShapesForGpuFrame = (
-    renderer: THREE.WebGLRenderer,
+export const collectProjectedPartShapesForGpuFrame = async (
     parts: ProjectionPartSource[],
     state: ProjectionMaskState | null,
     settings: ProjectionOverlaySettings,
@@ -1204,9 +1232,9 @@ export const collectProjectedPartShapesForGpuFrame = (
             } => preparedPart !== null,
         );
 
-    const rasterResults = rasterizer.rasterizeBatch(renderer, preparedParts);
+    const rasterResults = await rasterizer.rasterizeBatch(preparedParts);
 
-    return preparedParts
+    const shapes = preparedParts
         .map((preparedPart, index) => {
             const rasterData = rasterResults[index] ?? null;
             if (!rasterData) {
@@ -1223,6 +1251,7 @@ export const collectProjectedPartShapesForGpuFrame = (
         })
         .filter((part): part is ProjectedPartShape => part !== null)
         .sort((left, right) => right.depth - left.depth);
+    return shapes;
 };
 
 export const collectProjectedPartShapesForFrame = (

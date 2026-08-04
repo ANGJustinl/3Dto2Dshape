@@ -111,6 +111,9 @@ const ProjectionOverlay = forwardRef<ProjectionOverlayHandle>(function Projectio
         x: number,
         y: number,
     ) => {
+        if (field.kind !== 'cpu') {
+            return Number.POSITIVE_INFINITY;
+        }
         const localX = Math.max(0, Math.min(field.width - 1, Math.floor(x - field.offsetX)));
         const localY = Math.max(0, Math.min(field.height - 1, Math.floor(y - field.offsetY)));
         return field.values[localY * field.width + localX];
@@ -387,8 +390,7 @@ const ProjectionOverlay = forwardRef<ProjectionOverlayHandle>(function Projectio
                     return;
                 }
 
-                const shapes = collectProjectedPartShapesForGpuFrame(
-                    renderer,
+                const shapes = await collectProjectedPartShapesForGpuFrame(
                     parts,
                     maskState,
                     settings,
@@ -403,12 +405,13 @@ const ProjectionOverlay = forwardRef<ProjectionOverlayHandle>(function Projectio
                 const rendered = await gpuOverlayComposer.render(
                     canvas,
                     filteredShapes,
+                    null,
                     viewportWidth,
                     viewportHeight,
                     settings,
                 );
                 if (!rendered) {
-                    drawShapes(canvas, shapes, viewportWidth, viewportHeight, settings);
+                    drawShapes(canvas, filteredShapes, viewportWidth, viewportHeight, settings);
                 }
             })();
 

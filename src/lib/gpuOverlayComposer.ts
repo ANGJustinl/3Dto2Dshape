@@ -1,7 +1,7 @@
-import * as THREE from 'three';
+import type { GpuRasterAtlasState } from './gpuPartRasterizer';
 import type { ProjectedPartShape, ProjectionOverlaySettings } from './partProjection';
+import { getSharedWebGpuContext } from './webgpuShared';
 
-type GPUAdapterLike = any;
 type GPUCanvasContextLike = any;
 type GPUDeviceLike = any;
 type GPURenderPipelineLike = any;
@@ -9,152 +9,197 @@ type GPUBufferLike = any;
 type GPUTextureLike = any;
 type GPUBindGroupLike = any;
 
-type VertexBufferResource = {
-    buffer: GPUBufferLike;
-    vertexCount: number;
+type Point2D = { x: number; y: number };
+
+type ShapeBounds = {
+    offsetX: number;
+    offsetY: number;
+    width: number;
+    height: number;
 };
 
-type IndexBufferResource = {
-    buffer: GPUBufferLike;
-    indexCount: number;
-    format: 'uint16' | 'uint32';
+type PreparedShape = {
+    color: [number, number, number, number];
+    bounds: ShapeBounds;
+    maskValues: Uint8Array;
+    depthValues: Float32Array;
 };
 
 type ShapeGpuResource = {
-    depthBuffer: GPUBufferLike;
-    fillUniformBuffer: GPUBufferLike | null;
-    fillBindGroup: GPUBindGroupLike | null;
-    lineUniformBuffer: GPUBufferLike | null;
-    lineBindGroup: GPUBindGroupLike | null;
-    fillVertexBuffer: VertexBufferResource | null;
-    fillIndexBuffer: IndexBufferResource | null;
-    lineVertexBuffer: VertexBufferResource | null;
+    fillUniformBuffer: GPUBufferLike;
+    fillBindGroup: GPUBindGroupLike;
+    vertexBuffer: GPUBufferLike;
+    vertexCount: number;
+    maskTexture: GPUTextureLike;
+    depthTexture: GPUTextureLike;
 };
 
-type UniformPayload = {
-    bounds: [number, number, number, number];
-    viewport: [number, number];
-    color: [number, number, number, number];
-};
-
-const GPUBufferUsageMap = {
-    vertex: 0x0020,
-    index: 0x0010,
-    uniform: 0x0040,
-    storage: 0x0080,
-    copyDst: 0x0008,
-    renderAttachment: 0x0010,
-};
-
+const GPUBufferUsageUniform = 0x0040;
+const GPUBufferUsageVertex = 0x0020;
+const GPUBufferUsageCopyDst = 0x0008;
 const EDGE_COLOR: [number, number, number, number] = [16 / 255, 16 / 255, 16 / 255, 1];
 
-const hexToRgba = (hex: string): [number, number, number, number] => {
+const hexToRgba = (hex: string, alpha: number): [number, number, number, number] => {
     const normalized = hex.startsWith('#') ? hex.slice(1) : hex;
     return [
         Number.parseInt(normalized.slice(0, 2), 16) / 255,
         Number.parseInt(normalized.slice(2, 4), 16) / 255,
         Number.parseInt(normalized.slice(4, 6), 16) / 255,
-        1,
+        alpha,
     ];
 };
 
-const getLoopArea = (loop: Array<{ x: number; y: number }>) => {
-    let area = 0;
-    for (let index = 0; index < loop.length; index += 1) {
-        const current = loop[index];
-        const next = loop[(index + 1) % loop.length];
-        area += current.x * next.y - next.x * current.y;
-    }
-    return area * 0.5;
-};
+const getShapeBounds = (
+    shape: ProjectedPartShape,
+    viewportWidth: number,
+    viewportHeight: number,
+): ShapeBounds | null => {
+    let minX = Number.POSITIVE_INFINITY;
+    let minY = Number.POSITIVE_INFINITY;
+    let maxX = Number.NEGATIVE_INFINITY;
+    let maxY = Number.NEGATIVE_INFINITY;
 
-const normalizeLoopWinding = (loop: Array<{ x: number; y: number }>) =>
-    getLoopArea(loop) < 0 ? [...loop].reverse() : loop;
-
-const buildLoopTriangles = (loop: Array<{ x: number; y: number }>) => {
-    if (loop.length < 3) {
-        return null;
-    }
-
-    const normalizedLoop = normalizeLoopWinding(loop);
-    const contour = normalizedLoop.map((point) => new THREE.Vector2(point.x, point.y));
-    const triangleIndices = THREE.ShapeUtils.triangulateShape(contour, []);
-    if (triangleIndices.length === 0) {
-        return null;
-    }
-
-    const vertices = new Float32Array(normalizedLoop.length * 2);
-    normalizedLoop.forEach((point, index) => {
-        vertices[index * 2] = point.x;
-        vertices[index * 2 + 1] = point.y;
+    shape.loops.forEach((loop) => {
+        loop.forEach((point) => {
+            minX = Math.min(minX, point.x);
+            minY = Math.min(minY, point.y);
+            maxX = Math.max(maxX, point.x);
+            maxY = Math.max(maxY, point.y);
+        });
     });
 
-    const flatIndices = triangleIndices.flat();
-    const useUint32 = normalizedLoop.length > 65535;
-    const indices = useUint32 ? new Uint32Array(flatIndices) : new Uint16Array(flatIndices);
-
-    return {
-        vertices,
-        indices,
-        indexFormat: useUint32 ? ('uint32' as const) : ('uint16' as const),
-    };
-};
-
-const buildStrokeTriangles = (loop: Array<{ x: number; y: number }>, strokeWidth: number) => {
-    if (loop.length < 2) {
+    if (!Number.isFinite(minX) || !Number.isFinite(minY) || !Number.isFinite(maxX) || !Number.isFinite(maxY)) {
         return null;
     }
 
-    const normalizedLoop = normalizeLoopWinding(loop);
-    const halfWidth = Math.max(0.5, strokeWidth * 0.5);
-    const vertices: number[] = [];
+    const padding = Math.max(2, Math.ceil(shape.depthField.width > 0 && shape.depthField.height > 0 ? 1 : 0));
+    const offsetX = Math.max(0, Math.floor(minX) - padding);
+    const offsetY = Math.max(0, Math.floor(minY) - padding);
+    const endX = Math.min(viewportWidth, Math.ceil(maxX) + padding);
+    const endY = Math.min(viewportHeight, Math.ceil(maxY) + padding);
+    const width = endX - offsetX;
+    const height = endY - offsetY;
+    if (width <= 0 || height <= 0) {
+        return null;
+    }
 
-    for (let index = 0; index < normalizedLoop.length; index += 1) {
-        const start = normalizedLoop[index];
-        const end = normalizedLoop[(index + 1) % normalizedLoop.length];
-        const dx = end.x - start.x;
-        const dy = end.y - start.y;
-        const length = Math.hypot(dx, dy);
-        if (length <= 1e-5) {
+    return { offsetX, offsetY, width, height };
+};
+
+const buildLoopCoverageMask = (
+    shape: ProjectedPartShape,
+    bounds: ShapeBounds,
+    simplifyEpsilon: number,
+) => {
+    if (simplifyEpsilon <= 0.001) {
+        return {
+            offsetX: shape.coverageMask.offsetX,
+            offsetY: shape.coverageMask.offsetY,
+            width: shape.coverageMask.width,
+            height: shape.coverageMask.height,
+            values: shape.coverageMask.values,
+        };
+    }
+
+    const mask = new Uint8Array(bounds.width * bounds.height);
+    const intersections: number[] = [];
+
+    for (let localY = 0; localY < bounds.height; localY += 1) {
+        intersections.length = 0;
+        const sampleY = bounds.offsetY + localY + 0.5;
+
+        shape.loops.forEach((loop) => {
+            for (let index = 0, previous = loop.length - 1; index < loop.length; previous = index, index += 1) {
+                const current = loop[index];
+                const prior = loop[previous];
+                const crosses = (current.y > sampleY) !== (prior.y > sampleY);
+                if (!crosses) {
+                    continue;
+                }
+
+                const intersectionX =
+                    ((prior.x - current.x) * (sampleY - current.y)) / (prior.y - current.y) + current.x;
+                intersections.push(intersectionX);
+            }
+        });
+
+        if (intersections.length < 2) {
             continue;
         }
 
-        const normalX = -dy / length;
-        const normalY = dx / length;
-        const offsetX = normalX * halfWidth;
-        const offsetY = normalY * halfWidth;
+        intersections.sort((left, right) => left - right);
 
-        const a = [start.x + offsetX, start.y + offsetY];
-        const b = [start.x - offsetX, start.y - offsetY];
-        const c = [end.x + offsetX, end.y + offsetY];
-        const d = [end.x - offsetX, end.y - offsetY];
-
-        vertices.push(
-            a[0], a[1],
-            b[0], b[1],
-            c[0], c[1],
-            c[0], c[1],
-            b[0], b[1],
-            d[0], d[1],
-        );
+        for (let index = 0; index + 1 < intersections.length; index += 2) {
+            const startX = intersections[index];
+            const endX = intersections[index + 1];
+            const localStartX = Math.max(0, Math.ceil(startX - bounds.offsetX - 0.5));
+            const localEndX = Math.min(bounds.width - 1, Math.floor(endX - bounds.offsetX - 0.5));
+            for (let localX = localStartX; localX <= localEndX; localX += 1) {
+                mask[localY * bounds.width + localX] = 255;
+            }
+        }
     }
 
-    if (vertices.length === 0) {
+    return {
+        offsetX: bounds.offsetX,
+        offsetY: bounds.offsetY,
+        width: bounds.width,
+        height: bounds.height,
+        values: mask,
+    };
+};
+
+const sampleCpuDepth = (shape: ProjectedPartShape, x: number, y: number) => {
+    if (shape.depthField.kind !== 'cpu') {
+        return Number.POSITIVE_INFINITY;
+    }
+    const localX = Math.max(0, Math.min(shape.depthField.width - 1, Math.floor(x - shape.depthField.offsetX)));
+    const localY = Math.max(0, Math.min(shape.depthField.height - 1, Math.floor(y - shape.depthField.offsetY)));
+    return shape.depthField.values[localY * shape.depthField.width + localX];
+};
+
+const buildPreparedShape = (
+    shape: ProjectedPartShape,
+    viewportWidth: number,
+    viewportHeight: number,
+    settings: ProjectionOverlaySettings,
+): PreparedShape | null => {
+    const bounds = getShapeBounds(shape, viewportWidth, viewportHeight);
+    if (!bounds || shape.depthField.kind !== 'cpu') {
         return null;
     }
 
-    return new Float32Array(vertices);
+    const coverageMask = buildLoopCoverageMask(shape, bounds, settings.simplifyEpsilon);
+    const depthValues = new Float32Array(coverageMask.width * coverageMask.height);
+    depthValues.fill(Number.POSITIVE_INFINITY);
+
+    for (let localY = 0; localY < coverageMask.height; localY += 1) {
+        const rowOffset = localY * coverageMask.width;
+        for (let localX = 0; localX < coverageMask.width; localX += 1) {
+            if (coverageMask.values[rowOffset + localX] === 0) {
+                continue;
+            }
+
+            const x = coverageMask.offsetX + localX;
+            const y = coverageMask.offsetY + localY;
+            depthValues[rowOffset + localX] = sampleCpuDepth(shape, x + 0.5, y + 0.5);
+        }
+    }
+
+    return {
+        color: hexToRgba(shape.color, settings.opacity),
+        bounds,
+        maskValues: coverageMask.values,
+        depthValues,
+    };
 };
 
 export class GpuOverlayComposer {
-    private adapterPromise: Promise<GPUAdapterLike | null> | null = null;
     private devicePromise: Promise<GPUDeviceLike | null> | null = null;
-    private device: GPUDeviceLike | null = null;
     private context: GPUCanvasContextLike | null = null;
     private canvas: HTMLCanvasElement | null = null;
     private format: string | null = null;
     private fillPipeline: GPURenderPipelineLike | null = null;
-    private linePipeline: GPURenderPipelineLike | null = null;
     private bindGroupLayout: any = null;
     private depthTexture: GPUTextureLike | null = null;
     private depthTextureWidth = 0;
@@ -162,25 +207,10 @@ export class GpuOverlayComposer {
     private pendingDisposables = new Map<number, Array<{ destroy: () => void }>>();
     private latestRenderId = 0;
 
-    dispose() {
-        this.destroyDepthTexture();
-        this.pendingDisposables.forEach((resources) => {
-            resources.forEach((resource) => resource.destroy());
-        });
-        this.pendingDisposables.clear();
-        this.fillPipeline = null;
-        this.linePipeline = null;
-        this.bindGroupLayout = null;
-        this.context = null;
-        this.canvas = null;
-        this.device = null;
-        this.devicePromise = null;
-        this.adapterPromise = null;
-    }
-
     async render(
         canvas: HTMLCanvasElement,
         shapes: ProjectedPartShape[],
+        _atlasState: GpuRasterAtlasState | null,
         viewportWidth: number,
         viewportHeight: number,
         settings: ProjectionOverlaySettings,
@@ -189,13 +219,15 @@ export class GpuOverlayComposer {
             return false;
         }
 
-        const filteredShapes = shapes.filter((shape) => shape.loops.length > 0);
-        if (filteredShapes.length === 0) {
+        const preparedShapes = shapes
+            .map((shape) => buildPreparedShape(shape, viewportWidth, viewportHeight, settings))
+            .filter((shape): shape is PreparedShape => shape !== null);
+        if (preparedShapes.length === 0) {
             await this.clear(canvas, viewportWidth, viewportHeight);
             return false;
         }
 
-        const device = await this.ensureDevice();
+        const device = await this.getDevice();
         if (!device) {
             return false;
         }
@@ -207,11 +239,7 @@ export class GpuOverlayComposer {
         this.ensureDepthTexture(device, canvas.width, canvas.height);
         this.ensurePipelines(device);
 
-        const resources = filteredShapes
-            .slice()
-            .sort((left, right) => right.depth - left.depth)
-            .flatMap((shape) => this.createShapeResources(device, shape, viewportWidth, viewportHeight, settings));
-
+        const resources = preparedShapes.map((shape) => this.createShapeResource(device, shape, viewportWidth, viewportHeight, settings));
         const currentTexture = this.context!.getCurrentTexture();
         const commandEncoder = device.createCommandEncoder();
         const renderPass = commandEncoder.beginRenderPass({
@@ -232,52 +260,26 @@ export class GpuOverlayComposer {
         });
 
         resources.forEach((resource) => {
-            if (resource.fillVertexBuffer && resource.fillIndexBuffer && resource.fillBindGroup) {
-                renderPass.setPipeline(this.fillPipeline);
-                renderPass.setBindGroup(0, resource.fillBindGroup);
-                renderPass.setVertexBuffer(0, resource.fillVertexBuffer.buffer);
-                renderPass.setIndexBuffer(resource.fillIndexBuffer.buffer, resource.fillIndexBuffer.format);
-                renderPass.drawIndexed(resource.fillIndexBuffer.indexCount);
-            }
-
-            if (resource.lineVertexBuffer && resource.lineBindGroup) {
-                renderPass.setPipeline(this.linePipeline);
-                renderPass.setBindGroup(0, resource.lineBindGroup);
-                renderPass.setVertexBuffer(0, resource.lineVertexBuffer.buffer);
-                renderPass.draw(resource.lineVertexBuffer.vertexCount);
-            }
+            renderPass.setPipeline(this.fillPipeline);
+            renderPass.setBindGroup(0, resource.fillBindGroup);
+            renderPass.setVertexBuffer(0, resource.vertexBuffer);
+            renderPass.draw(resource.vertexCount);
         });
 
         renderPass.end();
         device.queue.submit([commandEncoder.finish()]);
 
-        const frameResources = resources.flatMap((resource) => {
-            const disposables = [
-                resource.depthBuffer,
-            ] as Array<{ destroy: () => void }>;
-            if (resource.fillUniformBuffer) {
-                disposables.push(resource.fillUniformBuffer);
-            }
-            if (resource.lineUniformBuffer) {
-                disposables.push(resource.lineUniformBuffer);
-            }
-            if (resource.fillVertexBuffer) {
-                disposables.push(resource.fillVertexBuffer.buffer);
-            }
-            if (resource.fillIndexBuffer) {
-                disposables.push(resource.fillIndexBuffer.buffer);
-            }
-            if (resource.lineVertexBuffer) {
-                disposables.push(resource.lineVertexBuffer.buffer);
-            }
-            return disposables;
-        });
+        const frameResources = resources.flatMap((resource) => [
+            resource.fillUniformBuffer,
+            resource.vertexBuffer,
+            resource.maskTexture,
+            resource.depthTexture,
+        ]);
         this.pendingDisposables.set(renderId, frameResources);
-
         void device.queue.onSubmittedWorkDone().then(() => {
-            const completed = this.pendingDisposables.get(renderId);
+            const disposables = this.pendingDisposables.get(renderId);
             this.pendingDisposables.delete(renderId);
-            completed?.forEach((resource) => resource.destroy());
+            disposables?.forEach((resource) => resource.destroy());
         });
 
         return true;
@@ -288,7 +290,7 @@ export class GpuOverlayComposer {
             return;
         }
 
-        const device = await this.ensureDevice();
+        const device = await this.getDevice();
         if (!device) {
             const context = canvas.getContext('2d');
             context?.setTransform(1, 0, 0, 1, 0, 0);
@@ -313,35 +315,10 @@ export class GpuOverlayComposer {
         device.queue.submit([commandEncoder.finish()]);
     }
 
-    private async ensureDevice() {
-        if (this.device) {
-            return this.device;
-        }
-
-        if (!this.adapterPromise) {
-            this.adapterPromise = (async () => {
-                const gpuNavigator = navigator as Navigator & {
-                    gpu?: {
-                        requestAdapter?: () => Promise<GPUAdapterLike | null>;
-                        getPreferredCanvasFormat?: () => string;
-                    };
-                };
-                return (await gpuNavigator.gpu?.requestAdapter?.()) ?? null;
-            })();
-        }
-
+    private async getDevice() {
         if (!this.devicePromise) {
-            this.devicePromise = (async () => {
-                const adapter = await this.adapterPromise;
-                if (!adapter) {
-                    return null;
-                }
-                const device = await adapter.requestDevice();
-                this.device = device;
-                return device;
-            })();
+            this.devicePromise = getSharedWebGpuContext().getDevice();
         }
-
         return this.devicePromise;
     }
 
@@ -371,11 +348,8 @@ export class GpuOverlayComposer {
             throw new Error('WebGPU canvas context is not available.');
         }
 
-        const gpuNavigator = navigator as Navigator & {
-            gpu?: { getPreferredCanvasFormat?: () => string };
-        };
-        const preferredFormat = gpuNavigator.gpu?.getPreferredCanvasFormat?.() ?? 'bgra8unorm';
-        if (this.format !== preferredFormat || this.depthTextureWidth !== width || this.depthTextureHeight !== height) {
+        const preferredFormat = getSharedWebGpuContext().getPreferredCanvasFormat();
+        if (this.format !== preferredFormat) {
             this.context.configure({
                 device,
                 format: preferredFormat,
@@ -386,7 +360,7 @@ export class GpuOverlayComposer {
     }
 
     private ensurePipelines(device: GPUDeviceLike) {
-        if (this.fillPipeline && this.linePipeline) {
+        if (this.fillPipeline) {
             return;
         }
 
@@ -395,7 +369,10 @@ export class GpuOverlayComposer {
 struct Uniforms {
     bounds: vec4<f32>,
     viewport: vec2<f32>,
+    strokeRadius: f32,
+    showContours: f32,
     color: vec4<f32>,
+    edgeColor: vec4<f32>,
 }
 
 struct VertexInput {
@@ -412,18 +389,72 @@ struct FragmentOutput {
     @builtin(frag_depth) depth: f32,
 }
 
-@group(0) @binding(0) var<storage, read> depthField: array<f32>;
-@group(0) @binding(1) var<uniform> uniforms: Uniforms;
+@group(0) @binding(0) var maskTexture: texture_2d<f32>;
+@group(0) @binding(1) var depthTexture: texture_2d<f32>;
+@group(0) @binding(2) var<uniform> uniforms: Uniforms;
 
 fn clampPixel(x: i32, lower: i32, upper: i32) -> i32 {
     return max(lower, min(upper, x));
 }
 
-fn sampleDepth(screenPosition: vec2<f32>) -> f32 {
+fn sampleLocalCoords(screenPosition: vec2<f32>) -> vec2<i32> {
     let localX = clampPixel(i32(floor(screenPosition.x - uniforms.bounds.x)), 0, i32(uniforms.bounds.z) - 1);
     let localY = clampPixel(i32(floor(screenPosition.y - uniforms.bounds.y)), 0, i32(uniforms.bounds.w) - 1);
-    let index = localY * i32(uniforms.bounds.z) + localX;
-    return depthField[index];
+    return vec2<i32>(localX, localY);
+}
+
+fn sampleMask(localCoords: vec2<i32>) -> f32 {
+    return textureLoad(maskTexture, localCoords, 0).r;
+}
+
+fn sampleDepthNdc(localCoords: vec2<i32>) -> f32 {
+    return textureLoad(depthTexture, localCoords, 0).r;
+}
+
+fn isBaseBoundary(localCoords: vec2<i32>) -> bool {
+    if (sampleMask(localCoords) < 0.5) {
+        return false;
+    }
+
+    let neighbors = array<vec2<i32>, 4>(
+        vec2<i32>(-1, 0),
+        vec2<i32>(1, 0),
+        vec2<i32>(0, -1),
+        vec2<i32>(0, 1),
+    );
+    for (var index = 0; index < 4; index += 1) {
+        let sampleCoords = localCoords + neighbors[index];
+        if (
+            sampleCoords.x < 0 ||
+            sampleCoords.y < 0 ||
+            sampleCoords.x >= i32(uniforms.bounds.z) ||
+            sampleCoords.y >= i32(uniforms.bounds.w)
+        ) {
+            return true;
+        }
+        if (sampleMask(sampleCoords) < 0.5) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+fn isBoundary(localCoords: vec2<i32>) -> bool {
+    let radius = max(1, i32(round(uniforms.strokeRadius)));
+    for (var offsetY = -radius + 1; offsetY < radius; offsetY += 1) {
+        for (var offsetX = -radius + 1; offsetX < radius; offsetX += 1) {
+            let sampleX = localCoords.x + offsetX;
+            let sampleY = localCoords.y + offsetY;
+            if (sampleX < 0 || sampleY < 0 || sampleX >= i32(uniforms.bounds.z) || sampleY >= i32(uniforms.bounds.w)) {
+                continue;
+            }
+            if (isBaseBoundary(vec2<i32>(sampleX, sampleY))) {
+                return true;
+            }
+        }
+    }
+    return false;
 }
 
 @vertex
@@ -438,10 +469,16 @@ fn vertexMain(input: VertexInput) -> VertexOutput {
 
 @fragment
 fn fragmentMain(input: VertexOutput) -> FragmentOutput {
+    let localCoords = sampleLocalCoords(input.screenPosition);
+    let mask = sampleMask(localCoords);
+    if (mask < 0.5) {
+        discard;
+    }
+
+    let depthNdc = sampleDepthNdc(localCoords);
     var output: FragmentOutput;
-    let ndcDepth = sampleDepth(input.screenPosition);
-    output.color = uniforms.color;
-    output.depth = clamp(ndcDepth * 0.5 + 0.5, 0.0, 1.0);
+    output.color = select(uniforms.color, uniforms.edgeColor, uniforms.showContours > 0.5 && isBoundary(localCoords));
+    output.depth = clamp(depthNdc * 0.5 + 0.5, 0.0, 1.0);
     return output;
 }
             `,
@@ -452,22 +489,25 @@ fn fragmentMain(input: VertexOutput) -> FragmentOutput {
                 {
                     binding: 0,
                     visibility: GPUShaderStage.FRAGMENT,
-                    buffer: { type: 'read-only-storage' },
+                    texture: { sampleType: 'float' },
                 },
                 {
                     binding: 1,
+                    visibility: GPUShaderStage.FRAGMENT,
+                    texture: { sampleType: 'unfilterable-float' },
+                },
+                {
+                    binding: 2,
                     visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
                     buffer: { type: 'uniform' },
                 },
             ],
         });
 
-        const pipelineLayout = device.createPipelineLayout({
-            bindGroupLayouts: [this.bindGroupLayout],
-        });
-
         const commonDescriptor = {
-            layout: pipelineLayout,
+            layout: device.createPipelineLayout({
+                bindGroupLayouts: [this.bindGroupLayout],
+            }),
             vertex: {
                 module: shaderModule,
                 entryPoint: 'vertexMain',
@@ -487,11 +527,7 @@ fn fragmentMain(input: VertexOutput) -> FragmentOutput {
             fragment: {
                 module: shaderModule,
                 entryPoint: 'fragmentMain',
-                targets: [
-                    {
-                        format: this.format,
-                    },
-                ],
+                targets: [{ format: this.format }],
             },
             primitive: {
                 topology: 'triangle-list',
@@ -505,14 +541,6 @@ fn fragmentMain(input: VertexOutput) -> FragmentOutput {
         };
 
         this.fillPipeline = device.createRenderPipeline(commonDescriptor);
-        this.linePipeline = device.createRenderPipeline({
-            ...commonDescriptor,
-            depthStencil: {
-                format: 'depth24plus',
-                depthWriteEnabled: false,
-                depthCompare: 'less-equal',
-            },
-        });
     }
 
     private ensureDepthTexture(device: GPUDeviceLike, width: number, height: number) {
@@ -520,7 +548,7 @@ fn fragmentMain(input: VertexOutput) -> FragmentOutput {
             return;
         }
 
-        this.destroyDepthTexture();
+        this.depthTexture?.destroy();
         this.depthTexture = device.createTexture({
             size: { width, height },
             format: 'depth24plus',
@@ -530,120 +558,103 @@ fn fragmentMain(input: VertexOutput) -> FragmentOutput {
         this.depthTextureHeight = height;
     }
 
-    private destroyDepthTexture() {
-        this.depthTexture?.destroy();
-        this.depthTexture = null;
-        this.depthTextureWidth = 0;
-        this.depthTextureHeight = 0;
-    }
-
-    private createShapeResources(
+    private createShapeResource(
         device: GPUDeviceLike,
-        shape: ProjectedPartShape,
+        shape: PreparedShape,
         viewportWidth: number,
         viewportHeight: number,
         settings: ProjectionOverlaySettings,
-    ) {
-        const resources: ShapeGpuResource[] = [];
+    ): ShapeGpuResource {
+        const maskTexture = device.createTexture({
+            size: { width: shape.bounds.width, height: shape.bounds.height, depthOrArrayLayers: 1 },
+            format: 'r8unorm',
+            usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+        });
+        device.queue.writeTexture(
+            { texture: maskTexture },
+            shape.maskValues,
+            {
+                bytesPerRow: shape.bounds.width,
+                rowsPerImage: shape.bounds.height,
+            },
+            {
+                width: shape.bounds.width,
+                height: shape.bounds.height,
+                depthOrArrayLayers: 1,
+            },
+        );
 
-        shape.loops.forEach((loop) => {
-            const fill = buildLoopTriangles(loop);
-            const lineVertices = settings.showContours ? buildStrokeTriangles(loop, settings.strokeWidth) : null;
-            if (!fill && !lineVertices) {
-                return;
-            }
+        const depthTexture = device.createTexture({
+            size: { width: shape.bounds.width, height: shape.bounds.height, depthOrArrayLayers: 1 },
+            format: 'r32float',
+            usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+        });
+        device.queue.writeTexture(
+            { texture: depthTexture },
+            shape.depthValues,
+            {
+                bytesPerRow: shape.bounds.width * Float32Array.BYTES_PER_ELEMENT,
+                rowsPerImage: shape.bounds.height,
+            },
+            {
+                width: shape.bounds.width,
+                height: shape.bounds.height,
+                depthOrArrayLayers: 1,
+            },
+        );
 
-            const depthBuffer = this.createBuffer(
-                device,
-                shape.depthField.values,
-                GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-            );
-            const createUniformPayload = (color: [number, number, number, number]) =>
-                new Float32Array([
-                    shape.depthField.offsetX,
-                    shape.depthField.offsetY,
-                    shape.depthField.width,
-                    shape.depthField.height,
-                    viewportWidth,
-                    viewportHeight,
-                    0,
-                    0,
-                    ...color,
-                ]);
-            const createBindGroup = (uniformBuffer: GPUBufferLike) =>
-                device.createBindGroup({
-                    layout: this.bindGroupLayout,
-                    entries: [
-                        { binding: 0, resource: { buffer: depthBuffer } },
-                        { binding: 1, resource: { buffer: uniformBuffer } },
-                    ],
-                });
+        const vertices = new Float32Array([
+            shape.bounds.offsetX, shape.bounds.offsetY,
+            shape.bounds.offsetX + shape.bounds.width, shape.bounds.offsetY,
+            shape.bounds.offsetX, shape.bounds.offsetY + shape.bounds.height,
+            shape.bounds.offsetX, shape.bounds.offsetY + shape.bounds.height,
+            shape.bounds.offsetX + shape.bounds.width, shape.bounds.offsetY,
+            shape.bounds.offsetX + shape.bounds.width, shape.bounds.offsetY + shape.bounds.height,
+        ]);
+        const vertexBuffer = this.createBuffer(device, vertices, GPUBufferUsageVertex | GPUBufferUsageCopyDst);
 
-            const fillUniformBuffer = fill
-                ? this.createBuffer(
-                      device,
-                      createUniformPayload(hexToRgba(shape.color)),
-                      GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-                  )
-                : null;
-            const lineUniformBuffer = lineVertices
-                ? this.createBuffer(
-                      device,
-                      createUniformPayload(EDGE_COLOR),
-                      GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-                  )
-                : null;
-
-            resources.push({
-                depthBuffer,
-                fillUniformBuffer,
-                fillBindGroup: fillUniformBuffer ? createBindGroup(fillUniformBuffer) : null,
-                lineUniformBuffer,
-                lineBindGroup: lineUniformBuffer ? createBindGroup(lineUniformBuffer) : null,
-                fillVertexBuffer: fill
-                    ? {
-                          buffer: this.createBuffer(device, fill.vertices, GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST),
-                          vertexCount: fill.vertices.length / 2,
-                      }
-                    : null,
-                fillIndexBuffer: fill
-                    ? {
-                          buffer: this.createBuffer(device, fill.indices, GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST),
-                          indexCount: fill.indices.length,
-                          format: fill.indexFormat,
-                      }
-                    : null,
-                lineVertexBuffer: lineVertices
-                    ? {
-                          buffer: this.createBuffer(device, lineVertices, GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST),
-                          vertexCount: lineVertices.length / 2,
-                      }
-                    : null,
-            });
+        const fillUniformBuffer = this.createBuffer(
+            device,
+            new Float32Array([
+                shape.bounds.offsetX,
+                shape.bounds.offsetY,
+                shape.bounds.width,
+                shape.bounds.height,
+                viewportWidth,
+                viewportHeight,
+                settings.strokeWidth,
+                settings.showContours ? 1 : 0,
+                ...shape.color,
+                ...EDGE_COLOR,
+            ]),
+            GPUBufferUsageUniform | GPUBufferUsageCopyDst,
+        );
+        const fillBindGroup = device.createBindGroup({
+            layout: this.bindGroupLayout,
+            entries: [
+                { binding: 0, resource: maskTexture.createView() },
+                { binding: 1, resource: depthTexture.createView() },
+                { binding: 2, resource: { buffer: fillUniformBuffer } },
+            ],
         });
 
-        return resources;
+        return {
+            fillUniformBuffer,
+            fillBindGroup,
+            vertexBuffer,
+            vertexCount: 6,
+            maskTexture,
+            depthTexture,
+        };
     }
 
-    private createBuffer(
-        device: GPUDeviceLike,
-        data: Float32Array | Uint16Array | Uint32Array,
-        usage: number,
-    ) {
-        const alignedSize = Math.ceil(data.byteLength / 4) * 4;
+    private createBuffer(device: GPUDeviceLike, data: Float32Array, usage: number) {
         const buffer = device.createBuffer({
-            size: alignedSize,
+            size: data.byteLength,
             usage,
             mappedAtCreation: true,
         });
-        const mapped = buffer.getMappedRange();
-        if (data instanceof Float32Array) {
-            new Float32Array(mapped).set(data);
-        } else if (data instanceof Uint16Array) {
-            new Uint16Array(mapped).set(data);
-        } else {
-            new Uint32Array(mapped).set(data);
-        }
+        new Float32Array(buffer.getMappedRange()).set(data);
         buffer.unmap();
         return buffer;
     }
