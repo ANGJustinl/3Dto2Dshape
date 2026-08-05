@@ -44,6 +44,7 @@ type RasterizeRequest = {
 };
 
 type PreparedRequest = RasterizeRequest & {
+    sourceIndex: number;
     bounds: PartBounds;
     atlasX: number;
     atlasY: number;
@@ -125,7 +126,7 @@ class GpuPartRasterizer {
         const totalStart = performance.now();
         const device = await this.getDevice();
         if (!device) {
-            return [] as Array<GpuRasterizedPartData | null>;
+            return new Array<GpuRasterizedPartData | null>(requests.length).fill(null);
         }
 
         this.ensurePipelines(device);
@@ -133,7 +134,7 @@ class GpuPartRasterizer {
         const preparedRequests = this.prepareRequests(requests);
         const prepareMs = performance.now() - prepareStart;
         if (preparedRequests.length === 0) {
-            return [] as Array<GpuRasterizedPartData | null>;
+            return new Array<GpuRasterizedPartData | null>(requests.length).fill(null);
         }
 
         const atlasWidth = preparedRequests.reduce(
@@ -254,15 +255,16 @@ class GpuPartRasterizer {
         const submitReadbackMs = performance.now() - submitReadbackStart;
 
         const extractStart = performance.now();
-        const results = preparedRequests.map((request) =>
-            this.extractRasterizedData(
+        const results = new Array<GpuRasterizedPartData | null>(requests.length).fill(null);
+        preparedRequests.forEach((request) => {
+            results[request.sourceIndex] = this.extractRasterizedData(
                 maskPixels,
                 maskBytesPerRow,
                 request,
                 atlasWidth,
                 atlasHeight,
-            ),
-        );
+            );
+        });
         const extractMs = performance.now() - extractStart;
 
         recordPerfSample({
@@ -549,7 +551,7 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
         let cursorY = 0;
         let rowHeight = 0;
 
-        requests.forEach((request) => {
+        requests.forEach((request, sourceIndex) => {
             const bounds = computePartBounds(request.part, request.projectionCache);
             if (!bounds) {
                 return;
@@ -584,6 +586,7 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
 
             preparedRequests.push({
                 ...request,
+                sourceIndex,
                 bounds,
                 atlasX: cursorX,
                 atlasY: cursorY,
