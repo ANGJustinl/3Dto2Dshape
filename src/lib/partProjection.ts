@@ -1,5 +1,9 @@
 import * as THREE from 'three';
-import { getGpuPartRasterizer, type GpuRasterizedPartData } from './gpuPartRasterizer';
+import {
+    getGpuPartRasterizer,
+    type GpuDepthAtlasState,
+    type GpuRasterizedPartData,
+} from './gpuPartRasterizer';
 import type { ProjectionPartSource, ProjectionSharedChain } from './modelParts';
 import { recordPerfSample } from './perfLogger';
 import type { ProjectionFrameResult } from './webgpuScreenProjector';
@@ -18,19 +22,24 @@ export type ProjectedPartShape = {
     color: string;
     depth: number;
     loops: Array<Array<{ x: number; y: number }>>;
-    depthField: {
-        width: number;
-        height: number;
-        offsetX: number;
-        offsetY: number;
-        values: Float32Array;
-    };
     coverageMask: {
         width: number;
         height: number;
         offsetX: number;
         offsetY: number;
         values: Uint8Array;
+    };
+    rasterBounds: {
+        width: number;
+        height: number;
+        offsetX: number;
+        offsetY: number;
+    };
+    atlasRegion: {
+        atlasX: number;
+        atlasY: number;
+        atlasWidth: number;
+        atlasHeight: number;
     };
 };
 
@@ -612,19 +621,24 @@ const buildProjectedPartShapeFromRasterData = (
         color: part.color,
         depth: rasterData.nearestDepth,
         loops,
-        depthField: {
-            width: rasterData.width,
-            height: rasterData.height,
-            offsetX: rasterData.offsetX,
-            offsetY: rasterData.offsetY,
-            values: rasterData.depthValues,
-        },
         coverageMask: {
             width: rasterData.width,
             height: rasterData.height,
             offsetX: rasterData.offsetX,
             offsetY: rasterData.offsetY,
             values: rasterData.occupied,
+        },
+        rasterBounds: {
+            width: rasterData.width,
+            height: rasterData.height,
+            offsetX: rasterData.offsetX,
+            offsetY: rasterData.offsetY,
+        },
+        atlasRegion: {
+            atlasX: rasterData.atlasX,
+            atlasY: rasterData.atlasY,
+            atlasWidth: rasterData.atlasWidth,
+            atlasHeight: rasterData.atlasHeight,
         },
     } satisfies ProjectedPartShape;
     const finalizeShapeMs = performance.now() - finalizeShapeStart;
@@ -710,6 +724,7 @@ export const collectProjectedPartShapesForGpuFrame = async (
     const rasterStart = performance.now();
     const rasterResults = await rasterizer.rasterizeBatch(preparedParts);
     const rasterMs = performance.now() - rasterStart;
+    const depthAtlas = rasterizer.getDepthAtlasState();
 
     let buildSharedChainsMs = 0;
     let extractLoopsMs = 0;
@@ -754,5 +769,8 @@ export const collectProjectedPartShapesForGpuFrame = async (
         },
     });
 
-    return shapes;
+    return {
+        shapes,
+        depthAtlas,
+    };
 };

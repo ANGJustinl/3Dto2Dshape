@@ -104,7 +104,7 @@ const ProjectionOverlay = forwardRef<ProjectionOverlayHandle>(function Projectio
                 }
 
                 const collectStart = performance.now();
-                const shapes = await collectProjectedPartShapesForGpuFrame(
+                const projectionResult = await collectProjectedPartShapesForGpuFrame(
                     job.parts,
                     job.maskState,
                     job.settings,
@@ -112,12 +112,12 @@ const ProjectionOverlay = forwardRef<ProjectionOverlayHandle>(function Projectio
                     frame,
                 );
                 const collectMs = performance.now() - collectStart;
-                if (!shapes) {
+                if (!projectionResult) {
                     continue;
                 }
 
                 const filterStart = performance.now();
-                const filteredShapes = filterSmallProjectedPartShapes(shapes);
+                const filteredShapes = filterSmallProjectedPartShapes(projectionResult.shapes);
                 const filterMs = performance.now() - filterStart;
 
                 const composeStart = performance.now();
@@ -127,6 +127,7 @@ const ProjectionOverlay = forwardRef<ProjectionOverlayHandle>(function Projectio
                     job.viewportWidth,
                     job.viewportHeight,
                     job.settings,
+                    projectionResult.depthAtlas,
                 );
                 const composeMs = performance.now() - composeStart;
                 const overlayMs = performance.now() - overlayStart;

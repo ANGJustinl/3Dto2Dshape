@@ -1,3 +1,4 @@
+import type { GpuDepthAtlasState } from './gpuPartRasterizer';
 import type { ProjectedPartShape, ProjectionOverlaySettings } from './partProjection';
 import { recordPerfSample } from './perfLogger';
 import { getSharedWebGpuContext } from './webgpuShared';
@@ -9,8 +10,6 @@ type GPUBufferLike = any;
 type GPUTextureLike = any;
 type GPUBindGroupLike = any;
 
-type Point2D = { x: number; y: number };
-
 type ShapeBounds = {
     offsetX: number;
     offsetY: number;
@@ -21,8 +20,20 @@ type ShapeBounds = {
 type PreparedShape = {
     color: [number, number, number, number];
     bounds: ShapeBounds;
-    maskValues: Uint8Array;
-    depthValues: Float32Array;
+    rasterBounds: {
+        offsetX: number;
+        offsetY: number;
+        width: number;
+        height: number;
+    };
+    atlasRegion: {
+        atlasX: number;
+        atlasY: number;
+        atlasWidth: number;
+        atlasHeight: number;
+    };
+    loopRanges: Uint32Array;
+    loopPoints: Float32Array;
 };
 
 type ShapeGpuResource = {
@@ -30,13 +41,14 @@ type ShapeGpuResource = {
     fillBindGroup: GPUBindGroupLike;
     vertexBuffer: GPUBufferLike;
     vertexCount: number;
-    maskTexture: GPUTextureLike;
-    depthTexture: GPUTextureLike;
+    loopRangesBuffer: GPUBufferLike;
+    loopPointsBuffer: GPUBufferLike;
 };
 
 const GPUBufferUsageUniform = 0x0040;
 const GPUBufferUsageVertex = 0x0020;
 const GPUBufferUsageCopyDst = 0x0008;
+const GPUBufferUsageStorage = 0x0080;
 const EDGE_COLOR: [number, number, number, number] = [16 / 255, 16 / 255, 16 / 255, 1];
 
 const hexToRgba = (hex: string, alpha: number): [number, number, number, number] => {
@@ -72,7 +84,7 @@ const getShapeBounds = (
         return null;
     }
 
-    const padding = Math.max(2, Math.ceil(shape.depthField.width > 0 && shape.depthField.height > 0 ? 1 : 0));
+    const padding = 2;
     const offsetX = Math.max(0, Math.floor(minX) - padding);
     const offsetY = Math.max(0, Math.floor(minY) - padding);
     const endX = Math.min(viewportWidth, Math.ceil(maxX) + padding);
@@ -86,73 +98,29 @@ const getShapeBounds = (
     return { offsetX, offsetY, width, height };
 };
 
-const buildLoopCoverageMask = (
-    shape: ProjectedPartShape,
-    bounds: ShapeBounds,
-    simplifyEpsilon: number,
-) => {
-    if (simplifyEpsilon <= 0.001) {
-        return {
-            offsetX: shape.coverageMask.offsetX,
-            offsetY: shape.coverageMask.offsetY,
-            width: shape.coverageMask.width,
-            height: shape.coverageMask.height,
-            values: shape.coverageMask.values,
-        };
-    }
+const flattenLoops = (shape: ProjectedPartShape) => {
+    const loopRanges = new Uint32Array(shape.loops.length * 4);
+    const loopPoints = new Float32Array(
+        shape.loops.reduce((total, loop) => total + loop.length * 2, 0),
+    );
+    let pointOffset = 0;
 
-    const mask = new Uint8Array(bounds.width * bounds.height);
-    const intersections: number[] = [];
-
-    for (let localY = 0; localY < bounds.height; localY += 1) {
-        intersections.length = 0;
-        const sampleY = bounds.offsetY + localY + 0.5;
-
-        shape.loops.forEach((loop) => {
-            for (let index = 0, previous = loop.length - 1; index < loop.length; previous = index, index += 1) {
-                const current = loop[index];
-                const prior = loop[previous];
-                const crosses = (current.y > sampleY) !== (prior.y > sampleY);
-                if (!crosses) {
-                    continue;
-                }
-
-                const intersectionX =
-                    ((prior.x - current.x) * (sampleY - current.y)) / (prior.y - current.y) + current.x;
-                intersections.push(intersectionX);
-            }
+    shape.loops.forEach((loop, loopIndex) => {
+        loopRanges[loopIndex * 4] = pointOffset / 2;
+        loopRanges[loopIndex * 4 + 1] = loop.length;
+        loopRanges[loopIndex * 4 + 2] = 0;
+        loopRanges[loopIndex * 4 + 3] = 0;
+        loop.forEach((point) => {
+            loopPoints[pointOffset] = point.x;
+            loopPoints[pointOffset + 1] = point.y;
+            pointOffset += 2;
         });
-
-        if (intersections.length < 2) {
-            continue;
-        }
-
-        intersections.sort((left, right) => left - right);
-
-        for (let index = 0; index + 1 < intersections.length; index += 2) {
-            const startX = intersections[index];
-            const endX = intersections[index + 1];
-            const localStartX = Math.max(0, Math.ceil(startX - bounds.offsetX - 0.5));
-            const localEndX = Math.min(bounds.width - 1, Math.floor(endX - bounds.offsetX - 0.5));
-            for (let localX = localStartX; localX <= localEndX; localX += 1) {
-                mask[localY * bounds.width + localX] = 255;
-            }
-        }
-    }
+    });
 
     return {
-        offsetX: bounds.offsetX,
-        offsetY: bounds.offsetY,
-        width: bounds.width,
-        height: bounds.height,
-        values: mask,
+        loopRanges,
+        loopPoints,
     };
-};
-
-const sampleCpuDepth = (shape: ProjectedPartShape, x: number, y: number) => {
-    const localX = Math.max(0, Math.min(shape.depthField.width - 1, Math.floor(x - shape.depthField.offsetX)));
-    const localY = Math.max(0, Math.min(shape.depthField.height - 1, Math.floor(y - shape.depthField.offsetY)));
-    return shape.depthField.values[localY * shape.depthField.width + localX];
 };
 
 const buildPreparedShape = (
@@ -166,28 +134,14 @@ const buildPreparedShape = (
         return null;
     }
 
-    const coverageMask = buildLoopCoverageMask(shape, bounds, settings.simplifyEpsilon);
-    const depthValues = new Float32Array(coverageMask.width * coverageMask.height);
-    depthValues.fill(Number.POSITIVE_INFINITY);
-
-    for (let localY = 0; localY < coverageMask.height; localY += 1) {
-        const rowOffset = localY * coverageMask.width;
-        for (let localX = 0; localX < coverageMask.width; localX += 1) {
-            if (coverageMask.values[rowOffset + localX] === 0) {
-                continue;
-            }
-
-            const x = coverageMask.offsetX + localX;
-            const y = coverageMask.offsetY + localY;
-            depthValues[rowOffset + localX] = sampleCpuDepth(shape, x + 0.5, y + 0.5);
-        }
-    }
-
+    const flattenedLoops = flattenLoops(shape);
     return {
         color: hexToRgba(shape.color, settings.opacity),
         bounds,
-        maskValues: coverageMask.values,
-        depthValues,
+        rasterBounds: shape.rasterBounds,
+        atlasRegion: shape.atlasRegion,
+        loopRanges: flattenedLoops.loopRanges,
+        loopPoints: flattenedLoops.loopPoints,
     };
 };
 
@@ -210,6 +164,7 @@ export class GpuOverlayComposer {
         viewportWidth: number,
         viewportHeight: number,
         settings: ProjectionOverlaySettings,
+        depthAtlas: GpuDepthAtlasState | null,
     ) {
         const totalStart = performance.now();
         if (viewportWidth <= 0 || viewportHeight <= 0) {
@@ -221,7 +176,7 @@ export class GpuOverlayComposer {
             .map((shape) => buildPreparedShape(shape, viewportWidth, viewportHeight, settings))
             .filter((shape): shape is PreparedShape => shape !== null);
         const prepareMs = performance.now() - prepareStart;
-        if (preparedShapes.length === 0) {
+        if (preparedShapes.length === 0 || !depthAtlas) {
             await this.clear(canvas, viewportWidth, viewportHeight);
             return false;
         }
@@ -239,7 +194,16 @@ export class GpuOverlayComposer {
         this.ensurePipelines(device);
 
         const resourceStart = performance.now();
-        const resources = preparedShapes.map((shape) => this.createShapeResource(device, shape, viewportWidth, viewportHeight, settings));
+        const resources = preparedShapes.map((shape) =>
+            this.createShapeResource(
+                device,
+                shape,
+                viewportWidth,
+                viewportHeight,
+                settings,
+                depthAtlas,
+            ),
+        );
         const resourceMs = performance.now() - resourceStart;
 
         const encodeStart = performance.now();
@@ -279,8 +243,8 @@ export class GpuOverlayComposer {
         const frameResources = resources.flatMap((resource) => [
             resource.fillUniformBuffer,
             resource.vertexBuffer,
-            resource.maskTexture,
-            resource.depthTexture,
+            resource.loopRangesBuffer,
+            resource.loopPointsBuffer,
         ]);
         this.pendingDisposables.set(renderId, frameResources);
         void device.queue.onSubmittedWorkDone().then(() => {
@@ -386,9 +350,9 @@ export class GpuOverlayComposer {
             code: `
 struct Uniforms {
     bounds: vec4<f32>,
-    viewport: vec2<f32>,
-    strokeRadius: f32,
-    showContours: f32,
+    viewportStroke: vec4<f32>,
+    rasterBounds: vec4<f32>,
+    atlasRegion: vec4<f32>,
     color: vec4<f32>,
     edgeColor: vec4<f32>,
 }
@@ -407,79 +371,106 @@ struct FragmentOutput {
     @builtin(frag_depth) depth: f32,
 }
 
-@group(0) @binding(0) var maskTexture: texture_2d<f32>;
-@group(0) @binding(1) var depthTexture: texture_2d<f32>;
-@group(0) @binding(2) var<uniform> uniforms: Uniforms;
+@group(0) @binding(0) var<storage, read> loopRanges: array<vec4<u32>>;
+@group(0) @binding(1) var<storage, read> loopPoints: array<vec2<f32>>;
+@group(0) @binding(2) var depthAtlasTexture: texture_2d<f32>;
+@group(0) @binding(3) var<uniform> uniforms: Uniforms;
 
 fn clampPixel(x: i32, lower: i32, upper: i32) -> i32 {
     return max(lower, min(upper, x));
 }
 
-fn sampleLocalCoords(screenPosition: vec2<f32>) -> vec2<i32> {
-    let localX = clampPixel(i32(floor(screenPosition.x - uniforms.bounds.x)), 0, i32(uniforms.bounds.z) - 1);
-    let localY = clampPixel(i32(floor(screenPosition.y - uniforms.bounds.y)), 0, i32(uniforms.bounds.w) - 1);
-    return vec2<i32>(localX, localY);
+fn readLoopPoint(index: u32) -> vec2<f32> {
+    return loopPoints[index];
 }
 
-fn sampleMask(localCoords: vec2<i32>) -> f32 {
-    return textureLoad(maskTexture, localCoords, 0).r;
-}
-
-fn sampleDepthNdc(localCoords: vec2<i32>) -> f32 {
-    return textureLoad(depthTexture, localCoords, 0).r;
-}
-
-fn isBaseBoundary(localCoords: vec2<i32>) -> bool {
-    if (sampleMask(localCoords) < 0.5) {
-        return false;
-    }
-
-    let neighbors = array<vec2<i32>, 4>(
-        vec2<i32>(-1, 0),
-        vec2<i32>(1, 0),
-        vec2<i32>(0, -1),
-        vec2<i32>(0, 1),
-    );
-    for (var index = 0; index < 4; index += 1) {
-        let sampleCoords = localCoords + neighbors[index];
-        if (
-            sampleCoords.x < 0 ||
-            sampleCoords.y < 0 ||
-            sampleCoords.x >= i32(uniforms.bounds.z) ||
-            sampleCoords.y >= i32(uniforms.bounds.w)
-        ) {
-            return true;
+fn isInsideShape(screenPosition: vec2<f32>) -> bool {
+    var windingParity = 0u;
+    let loopCount = arrayLength(&loopRanges);
+    for (var loopIndex = 0u; loopIndex < loopCount; loopIndex += 1u) {
+        let range = loopRanges[loopIndex];
+        let start = range.x;
+        let count = range.y;
+        if (count < 3u) {
+            continue;
         }
-        if (sampleMask(sampleCoords) < 0.5) {
-            return true;
-        }
-    }
 
-    return false;
-}
-
-fn isBoundary(localCoords: vec2<i32>) -> bool {
-    let radius = max(1, i32(round(uniforms.strokeRadius)));
-    for (var offsetY = -radius + 1; offsetY < radius; offsetY += 1) {
-        for (var offsetX = -radius + 1; offsetX < radius; offsetX += 1) {
-            let sampleX = localCoords.x + offsetX;
-            let sampleY = localCoords.y + offsetY;
-            if (sampleX < 0 || sampleY < 0 || sampleX >= i32(uniforms.bounds.z) || sampleY >= i32(uniforms.bounds.w)) {
+        for (var pointIndex = 0u; pointIndex < count; pointIndex += 1u) {
+            let current = readLoopPoint(start + pointIndex);
+            let previous = readLoopPoint(start + ((pointIndex + count - 1u) % count));
+            let crosses = (current.y > screenPosition.y) != (previous.y > screenPosition.y);
+            if (!crosses) {
                 continue;
             }
-            if (isBaseBoundary(vec2<i32>(sampleX, sampleY))) {
-                return true;
+
+            let intersectionX =
+                ((previous.x - current.x) * (screenPosition.y - current.y)) / (previous.y - current.y) + current.x;
+            if (intersectionX > screenPosition.x) {
+                windingParity = windingParity ^ 1u;
             }
         }
     }
-    return false;
+
+    return windingParity == 1u;
+}
+
+fn pointToSegmentDistance(point: vec2<f32>, start: vec2<f32>, end: vec2<f32>) -> f32 {
+    let delta = end - start;
+    let lengthSquared = dot(delta, delta);
+    if (lengthSquared <= 0.00001) {
+        return distance(point, start);
+    }
+
+    let t = clamp(dot(point - start, delta) / lengthSquared, 0.0, 1.0);
+    let projected = start + delta * t;
+    return distance(point, projected);
+}
+
+fn isBoundary(screenPosition: vec2<f32>) -> bool {
+    let strokeRadius = max(0.5, uniforms.viewportStroke.z);
+    var minimumDistance = 1e20;
+    let loopCount = arrayLength(&loopRanges);
+    for (var loopIndex = 0u; loopIndex < loopCount; loopIndex += 1u) {
+        let range = loopRanges[loopIndex];
+        let start = range.x;
+        let count = range.y;
+        if (count < 2u) {
+            continue;
+        }
+
+        for (var pointIndex = 0u; pointIndex < count; pointIndex += 1u) {
+            let current = readLoopPoint(start + pointIndex);
+            let next = readLoopPoint(start + ((pointIndex + 1u) % count));
+            minimumDistance = min(minimumDistance, pointToSegmentDistance(screenPosition, current, next));
+        }
+    }
+
+    return minimumDistance <= strokeRadius;
+}
+
+fn sampleDepthNdc(screenPosition: vec2<f32>) -> f32 {
+    let atlasLocalX = clampPixel(
+        i32(floor(screenPosition.x - uniforms.rasterBounds.x)),
+        0,
+        i32(uniforms.rasterBounds.z) - 1,
+    );
+    let atlasLocalY = clampPixel(
+        i32(floor(screenPosition.y - uniforms.rasterBounds.y)),
+        0,
+        i32(uniforms.rasterBounds.w) - 1,
+    );
+    let atlasCoords = vec2<i32>(
+        i32(uniforms.atlasRegion.x) + atlasLocalX,
+        i32(uniforms.atlasRegion.y) + atlasLocalY,
+    );
+    return textureLoad(depthAtlasTexture, atlasCoords, 0).r;
 }
 
 @vertex
 fn vertexMain(input: VertexInput) -> VertexOutput {
     var output: VertexOutput;
-    let clipX = input.position.x / uniforms.viewport.x * 2.0 - 1.0;
-    let clipY = 1.0 - input.position.y / uniforms.viewport.y * 2.0;
+    let clipX = input.position.x / uniforms.viewportStroke.x * 2.0 - 1.0;
+    let clipY = 1.0 - input.position.y / uniforms.viewportStroke.y * 2.0;
     output.clipPosition = vec4<f32>(clipX, clipY, 0.0, 1.0);
     output.screenPosition = input.position;
     return output;
@@ -487,15 +478,17 @@ fn vertexMain(input: VertexInput) -> VertexOutput {
 
 @fragment
 fn fragmentMain(input: VertexOutput) -> FragmentOutput {
-    let localCoords = sampleLocalCoords(input.screenPosition);
-    let mask = sampleMask(localCoords);
-    if (mask < 0.5) {
+    if (!isInsideShape(input.screenPosition)) {
         discard;
     }
 
-    let depthNdc = sampleDepthNdc(localCoords);
+    let depthNdc = sampleDepthNdc(input.screenPosition);
     var output: FragmentOutput;
-    output.color = select(uniforms.color, uniforms.edgeColor, uniforms.showContours > 0.5 && isBoundary(localCoords));
+    output.color = select(
+        uniforms.color,
+        uniforms.edgeColor,
+        uniforms.viewportStroke.w > 0.5 && isBoundary(input.screenPosition),
+    );
     output.depth = clamp(depthNdc * 0.5 + 0.5, 0.0, 1.0);
     return output;
 }
@@ -507,15 +500,20 @@ fn fragmentMain(input: VertexOutput) -> FragmentOutput {
                 {
                     binding: 0,
                     visibility: GPUShaderStage.FRAGMENT,
-                    texture: { sampleType: 'float' },
+                    buffer: { type: 'read-only-storage' },
                 },
                 {
                     binding: 1,
                     visibility: GPUShaderStage.FRAGMENT,
-                    texture: { sampleType: 'unfilterable-float' },
+                    buffer: { type: 'read-only-storage' },
                 },
                 {
                     binding: 2,
+                    visibility: GPUShaderStage.FRAGMENT,
+                    texture: { sampleType: 'unfilterable-float' },
+                },
+                {
+                    binding: 3,
                     visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
                     buffer: { type: 'uniform' },
                 },
@@ -582,43 +580,17 @@ fn fragmentMain(input: VertexOutput) -> FragmentOutput {
         viewportWidth: number,
         viewportHeight: number,
         settings: ProjectionOverlaySettings,
+        depthAtlas: GpuDepthAtlasState,
     ): ShapeGpuResource {
-        const maskTexture = device.createTexture({
-            size: { width: shape.bounds.width, height: shape.bounds.height, depthOrArrayLayers: 1 },
-            format: 'r8unorm',
-            usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
-        });
-        device.queue.writeTexture(
-            { texture: maskTexture },
-            shape.maskValues,
-            {
-                bytesPerRow: shape.bounds.width,
-                rowsPerImage: shape.bounds.height,
-            },
-            {
-                width: shape.bounds.width,
-                height: shape.bounds.height,
-                depthOrArrayLayers: 1,
-            },
+        const loopRangesBuffer = this.createBuffer(
+            device,
+            shape.loopRanges,
+            GPUBufferUsageStorage | GPUBufferUsageCopyDst,
         );
-
-        const depthTexture = device.createTexture({
-            size: { width: shape.bounds.width, height: shape.bounds.height, depthOrArrayLayers: 1 },
-            format: 'r32float',
-            usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
-        });
-        device.queue.writeTexture(
-            { texture: depthTexture },
-            shape.depthValues,
-            {
-                bytesPerRow: shape.bounds.width * Float32Array.BYTES_PER_ELEMENT,
-                rowsPerImage: shape.bounds.height,
-            },
-            {
-                width: shape.bounds.width,
-                height: shape.bounds.height,
-                depthOrArrayLayers: 1,
-            },
+        const loopPointsBuffer = this.createBuffer(
+            device,
+            shape.loopPoints,
+            GPUBufferUsageStorage | GPUBufferUsageCopyDst,
         );
 
         const vertices = new Float32Array([
@@ -642,6 +614,14 @@ fn fragmentMain(input: VertexOutput) -> FragmentOutput {
                 viewportHeight,
                 settings.strokeWidth,
                 settings.showContours ? 1 : 0,
+                shape.rasterBounds.offsetX,
+                shape.rasterBounds.offsetY,
+                shape.rasterBounds.width,
+                shape.rasterBounds.height,
+                shape.atlasRegion.atlasX,
+                shape.atlasRegion.atlasY,
+                depthAtlas.width,
+                depthAtlas.height,
                 ...shape.color,
                 ...EDGE_COLOR,
             ]),
@@ -650,9 +630,10 @@ fn fragmentMain(input: VertexOutput) -> FragmentOutput {
         const fillBindGroup = device.createBindGroup({
             layout: this.bindGroupLayout,
             entries: [
-                { binding: 0, resource: maskTexture.createView() },
-                { binding: 1, resource: depthTexture.createView() },
-                { binding: 2, resource: { buffer: fillUniformBuffer } },
+                { binding: 0, resource: { buffer: loopRangesBuffer } },
+                { binding: 1, resource: { buffer: loopPointsBuffer } },
+                { binding: 2, resource: depthAtlas.texture.createView() },
+                { binding: 3, resource: { buffer: fillUniformBuffer } },
             ],
         });
 
@@ -661,18 +642,22 @@ fn fragmentMain(input: VertexOutput) -> FragmentOutput {
             fillBindGroup,
             vertexBuffer,
             vertexCount: 6,
-            maskTexture,
-            depthTexture,
+            loopRangesBuffer,
+            loopPointsBuffer,
         };
     }
 
-    private createBuffer(device: GPUDeviceLike, data: Float32Array, usage: number) {
+    private createBuffer(device: GPUDeviceLike, data: Float32Array | Uint32Array, usage: number) {
         const buffer = device.createBuffer({
             size: data.byteLength,
             usage,
             mappedAtCreation: true,
         });
-        new Float32Array(buffer.getMappedRange()).set(data);
+        if (data instanceof Float32Array) {
+            new Float32Array(buffer.getMappedRange()).set(data);
+        } else {
+            new Uint32Array(buffer.getMappedRange()).set(data);
+        }
         buffer.unmap();
         return buffer;
     }

@@ -11,7 +11,6 @@ type GPUTextureLike = any;
 
 export type GpuRasterizedPartData = {
     occupied: Uint8Array;
-    depthValues: Float32Array;
     nearestDepth: number;
     width: number;
     height: number;
@@ -21,6 +20,12 @@ export type GpuRasterizedPartData = {
     atlasY: number;
     atlasWidth: number;
     atlasHeight: number;
+};
+
+export type GpuDepthAtlasState = {
+    texture: GPUTextureLike;
+    width: number;
+    height: number;
 };
 
 type PartBounds = {
@@ -184,32 +189,19 @@ class GpuPartRasterizer {
             size: maskBytesPerRow * atlasHeight,
             usage: GPUBufferUsageMapRead | GPUBufferUsageCopyDst,
         });
-        const depthBytesPerRow = Math.ceil((atlasWidth * Float32Array.BYTES_PER_ELEMENT) / 256) * 256;
-        const depthReadbackBuffer = device.createBuffer({
-            size: depthBytesPerRow * atlasHeight,
-            usage: GPUBufferUsageMapRead | GPUBufferUsageCopyDst,
-        });
         commandEncoder.copyTextureToBuffer(
             { texture: this.maskTexture },
             { buffer: maskReadbackBuffer, bytesPerRow: maskBytesPerRow, rowsPerImage: atlasHeight },
-            { width: atlasWidth, height: atlasHeight, depthOrArrayLayers: 1 },
-        );
-        commandEncoder.copyTextureToBuffer(
-            { texture: this.depthTexture },
-            { buffer: depthReadbackBuffer, bytesPerRow: depthBytesPerRow, rowsPerImage: atlasHeight },
             { width: atlasWidth, height: atlasHeight, depthOrArrayLayers: 1 },
         );
         const encodeMs = performance.now() - encodeStart;
 
         const submitReadbackStart = performance.now();
         device.queue.submit([commandEncoder.finish()]);
-        await Promise.all([maskReadbackBuffer.mapAsync(1), depthReadbackBuffer.mapAsync(1)]);
+        await maskReadbackBuffer.mapAsync(1);
         const maskPixels = new Uint8Array(maskReadbackBuffer.getMappedRange().slice(0));
-        const depthPixels = new Float32Array(depthReadbackBuffer.getMappedRange().slice(0));
         maskReadbackBuffer.unmap();
-        depthReadbackBuffer.unmap();
         maskReadbackBuffer.destroy();
-        depthReadbackBuffer.destroy();
         const submitReadbackMs = performance.now() - submitReadbackStart;
 
         const extractStart = performance.now();
@@ -217,8 +209,6 @@ class GpuPartRasterizer {
             this.extractRasterizedData(
                 maskPixels,
                 maskBytesPerRow,
-                depthPixels,
-                depthBytesPerRow / Float32Array.BYTES_PER_ELEMENT,
                 request,
                 atlasWidth,
                 atlasHeight,
@@ -426,15 +416,11 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
     private extractRasterizedData(
         maskPixels: Uint8Array,
         maskBytesPerRow: number,
-        depthPixels: Float32Array,
-        depthRowStride: number,
         request: PreparedRequest,
         atlasWidth: number,
         atlasHeight: number,
     ) {
         const occupied = new Uint8Array(request.bounds.width * request.bounds.height);
-        const depthValues = new Float32Array(request.bounds.width * request.bounds.height);
-        depthValues.fill(Number.POSITIVE_INFINITY);
 
         for (let localY = 0; localY < request.bounds.height; localY += 1) {
             const atlasRow = request.atlasY + localY;
@@ -445,13 +431,11 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
                     continue;
                 }
                 occupied[targetIndex] = 1;
-                depthValues[targetIndex] = depthPixels[atlasRow * depthRowStride + request.atlasX + localX];
             }
         }
 
         return {
             occupied,
-            depthValues,
             nearestDepth: request.nearestDepth,
             width: request.bounds.width,
             height: request.bounds.height,
@@ -487,6 +471,18 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
         new Float32Array(buffer.getMappedRange()).set(data);
         buffer.unmap();
         return buffer;
+    }
+
+    getDepthAtlasState(): GpuDepthAtlasState | null {
+        if (!this.depthTexture) {
+            return null;
+        }
+
+        return {
+            texture: this.depthTexture,
+            width: this.atlasWidth,
+            height: this.atlasHeight,
+        };
     }
 }
 
