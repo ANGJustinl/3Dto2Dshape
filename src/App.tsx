@@ -578,7 +578,7 @@ function App() {
         stepForwardStrideFramesRef.current = () => stepAnimationByFrames(frameStrideRef.current);
 
         const applySegmentation = (targetModel: THREE.Object3D) => {
-            const segmentation = splitModelParts(targetModel, 'keling');
+            const segmentation = splitModelParts(targetModel, 'Corin');
             leafMaterialMapRef.current = segmentation.leafMaterialMap;
             projectionPartsRef.current = segmentation.projectionParts;
             projectionMaskStateRef.current = createProjectionMaskState(
@@ -616,7 +616,7 @@ function App() {
         };
 
         loader.load(
-            `${import.meta.env.BASE_URL}models/keling/keling.pmx`,
+            `${import.meta.env.BASE_URL}models/Corin/Corin.pmx`,
             (loadedModel: THREE.Object3D) => {
                 if (disposed) {
                     return;

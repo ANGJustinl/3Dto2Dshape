@@ -105,7 +105,6 @@ export type TriangleSampleDebugInfo = {
 };
 
 const MODEL_MATERIAL_EXCLUSION_KEYWORDS: Record<string, string[]> = {
-    keling: ['髪+'],
     Corin: ['髪+'],
 };
 
@@ -121,6 +120,10 @@ const TRIANGLE_INTERIOR_SAMPLE_BARYCENTRICS: Array<[number, number, number]> = [
     [0.2, 0.2, 0.6],
     [0.34, 0.33, 0.33],
 ];
+const texturePixelReaderCache = new WeakMap<
+    THREE.Texture,
+    ((u: number, v: number) => { r: number; g: number; b: number; a: number }) | null
+>();
 
 const colorKeyFromRgb = (r: number, g: number, b: number) =>
     [r, g, b]
@@ -477,6 +480,10 @@ const getTexturePixelReader = (texture: THREE.Texture | null | undefined) => {
         return null;
     }
 
+    if (texturePixelReaderCache.has(texture)) {
+        return texturePixelReaderCache.get(texture) ?? null;
+    }
+
     const dataTextureLikeImage =
         (texture.source?.data as {
             data?: ArrayLike<number>;
@@ -497,7 +504,7 @@ const getTexturePixelReader = (texture: THREE.Texture | null | undefined) => {
         const { data, width, height } = dataTextureLikeImage;
         const stride = Math.max(3, Math.round(data.length / (width * height)));
 
-        return (u: number, v: number) => {
+        const reader = (u: number, v: number) => {
             const x = Math.min(width - 1, Math.max(0, Math.round(u * (width - 1))));
             const y = Math.min(height - 1, Math.max(0, Math.round(v * (height - 1))));
             const offset = (y * width + x) * stride;
@@ -508,11 +515,13 @@ const getTexturePixelReader = (texture: THREE.Texture | null | undefined) => {
                 a: Number(data[offset + 3] ?? 255),
             };
         };
+        texturePixelReaderCache.set(texture, reader);
+        return reader;
     }
 
     if (texture.image instanceof ImageData) {
         const { data, width, height } = texture.image;
-        return (u: number, v: number) => {
+        const reader = (u: number, v: number) => {
             const x = Math.min(width - 1, Math.max(0, Math.round(u * (width - 1))));
             const y = Math.min(height - 1, Math.max(0, Math.round(v * (height - 1))));
             const offset = (y * width + x) * 4;
@@ -523,16 +532,19 @@ const getTexturePixelReader = (texture: THREE.Texture | null | undefined) => {
                 a: data[offset + 3],
             };
         };
+        texturePixelReaderCache.set(texture, reader);
+        return reader;
     }
 
     if (texture.image instanceof HTMLCanvasElement) {
         const context = texture.image.getContext('2d');
         if (!context) {
+            texturePixelReaderCache.set(texture, null);
             return null;
         }
         const { width, height } = texture.image;
         const imageData = context.getImageData(0, 0, width, height).data;
-        return (u: number, v: number) => {
+        const reader = (u: number, v: number) => {
             const x = Math.min(width - 1, Math.max(0, Math.round(u * (width - 1))));
             const y = Math.min(height - 1, Math.max(0, Math.round(v * (height - 1))));
             const offset = (y * width + x) * 4;
@@ -543,6 +555,8 @@ const getTexturePixelReader = (texture: THREE.Texture | null | undefined) => {
                 a: imageData[offset + 3],
             };
         };
+        texturePixelReaderCache.set(texture, reader);
+        return reader;
     }
 
     if (
@@ -557,11 +571,12 @@ const getTexturePixelReader = (texture: THREE.Texture | null | undefined) => {
         canvas.height = height;
         const context = canvas.getContext('2d');
         if (!context) {
+            texturePixelReaderCache.set(texture, null);
             return null;
         }
         context.drawImage(texture.image, 0, 0, width, height);
         const imageData = context.getImageData(0, 0, width, height).data;
-        return (u: number, v: number) => {
+        const reader = (u: number, v: number) => {
             const x = Math.min(width - 1, Math.max(0, Math.round(u * (width - 1))));
             const y = Math.min(height - 1, Math.max(0, Math.round(v * (height - 1))));
             const offset = (y * width + x) * 4;
@@ -572,8 +587,11 @@ const getTexturePixelReader = (texture: THREE.Texture | null | undefined) => {
                 a: imageData[offset + 3],
             };
         };
+        texturePixelReaderCache.set(texture, reader);
+        return reader;
     }
 
+    texturePixelReaderCache.set(texture, null);
     return null;
 };
 
