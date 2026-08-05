@@ -1,30 +1,30 @@
 # 2DRender Pipeline
 
 ```mermaid
-flowchart LR
-    A["App / ProjectionOverlay"] -->|"scene, camera, root, parts, maskState, settings, frameId"| B["2DRenderPipeline/overlayPipeline.ts"]
+flowchart TD
+    A["Frame Scheduling (CPU)"]
+    B["Mesh Projection (GPU)"]
+    C["Part Rasterization (GPU)"]
+    D["Part Build (CPU)"]
+    E["Part Filtering (CPU)"]
+    F["Composition (GPU)"]
+    G["Right Canvas"]
 
-    B -->|"parts, camera, viewport, frameId"| C["2DRenderStages/meshProjection"]
-    C -->|"ProjectionFrameResult
-per-mesh screenX / screenY / depth"| B
-
-    B -->|"parts, maskState, settings, visibleLeafIds, frame"| D["2DRenderStages/partShaping"]
-    D -->|"prepared parts + projection cache"| E["2DRenderStages/partRasterization"]
-    E -->|"GpuRasterizedPartData[] + depthAtlas"| D
-    D -->|"ProjectedPartShape[]"| B
-
-    B -->|"ProjectedPartShape[]"| F["2DRenderStages/partFiltering"]
-    F -->|"filtered ProjectedPartShape[]"| B
-
-    B -->|"canvas, filtered shapes, viewport, settings, depthAtlas"| G["2DRenderStages/composition"]
-    G -->|"final right-side overlay"| H["WebGPU Canvas"]
-
-    I["2DRenderShared/maskState.ts"] -->|"ProjectionMaskState
-sharedChains"| A
-    J["2DRenderShared/types.ts
-geometry.ts
-filters.ts"] -.->|"shared types / pure helpers"| C
-    J -.->|"shared types / pure helpers"| D
-    J -.->|"shared types / pure helpers"| F
-    J -.->|"shared types / pure helpers"| G
+    A -->|"scene, camera, root, parts, maskState, settings, frameId"| B
+    B -->|"mesh screen coords + depth"| C
+    C -->|"part masks"| D
+    C -->|"depthAtlas"| F
+    D -->|"ProjectedPartShape[]"| E
+    E -->|"filtered ProjectedPartShape[]"| F
+    F -->|"final 2D render"| G
 ```
+
+| Processing | Main files |
+| --- | --- |
+| `Frame Scheduling (CPU)` | [ProjectionOverlay.tsx](src/components/ProjectionOverlay.tsx), [overlayPipeline.ts](src/lib/2DRenderPipeline/overlayPipeline.ts) |
+| `Mesh Projection (GPU)` | [2DRenderStages/meshProjection/](src/lib/2DRenderStages/meshProjection/) |
+| `Part Rasterization (GPU)` | [2DRenderStages/partRasterization/](src/lib/2DRenderStages/partRasterization/) |
+| `Part Build (CPU)` | [2DRenderStages/partShaping/](src/lib/2DRenderStages/partShaping/) |
+| `Part Filtering (CPU)` | [2DRenderStages/partFiltering/](src/lib/2DRenderStages/partFiltering/) |
+| `Composition (GPU)` | [2DRenderStages/composition/](src/lib/2DRenderStages/composition/) |
+| `Shared Data And Helpers` | [2DRenderShared/](src/lib/2DRenderShared/) |
