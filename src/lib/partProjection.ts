@@ -5,6 +5,7 @@ import {
     type GpuRasterizedPartData,
 } from './gpuPartRasterizer';
 import type { ProjectionPartSource, ProjectionSharedChain } from './modelParts';
+import type { OrientedBounds2D } from './orientedBounds';
 import { recordPerfSample } from './perfLogger';
 import type { ProjectionFrameResult } from './webgpuScreenProjector';
 
@@ -34,6 +35,7 @@ export type ProjectedPartShape = {
         atlasWidth: number;
         atlasHeight: number;
     };
+    orientedBounds: OrientedBounds2D;
 };
 
 const MIN_RENDERED_PART_SCREEN_AREA = 48;
@@ -626,6 +628,7 @@ const buildProjectedPartShapeFromRasterData = (
             atlasWidth: rasterData.atlasWidth,
             atlasHeight: rasterData.atlasHeight,
         },
+        orientedBounds: rasterData.orientedBounds,
     } satisfies ProjectedPartShape;
     const finalizeShapeMs = performance.now() - finalizeShapeStart;
 

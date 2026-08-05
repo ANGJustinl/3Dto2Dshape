@@ -1,4 +1,5 @@
 import type { ProjectionPartSource } from './modelParts';
+import { computeOrientedBounds2D, type OrientedBounds2D } from './orientedBounds';
 import type { MeshProjectionCache } from './partProjection';
 import { recordPerfSample } from './perfLogger';
 import { getSharedWebGpuContext } from './webgpuShared';
@@ -20,6 +21,7 @@ export type GpuRasterizedPartData = {
     atlasY: number;
     atlasWidth: number;
     atlasHeight: number;
+    orientedBounds: OrientedBounds2D;
 };
 
 export type GpuDepthAtlasState = {
@@ -47,6 +49,7 @@ type PreparedRequest = RasterizeRequest & {
     atlasY: number;
     nearestDepth: number;
     triangleData: Float32Array;
+    orientedBounds: OrientedBounds2D;
 };
 
 const WORKGROUP_SIZE = 8;
@@ -108,10 +111,13 @@ const computePartBounds = (
 
 class GpuPartRasterizer {
     private devicePromise: Promise<GPUDeviceLike | null> | null = null;
-    private pipeline: GPUComputePipelineLike | null = null;
-    private bindGroupLayout: any = null;
+    private rasterPipeline: GPUComputePipelineLike | null = null;
+    private completionPipeline: GPUComputePipelineLike | null = null;
+    private rasterBindGroupLayout: any = null;
+    private completionBindGroupLayout: any = null;
     private maskTexture: GPUTextureLike | null = null;
-    private depthTexture: GPUTextureLike | null = null;
+    private rawDepthTexture: GPUTextureLike | null = null;
+    private completedDepthTexture: GPUTextureLike | null = null;
     private atlasWidth = 1;
     private atlasHeight = 1;
 
@@ -122,7 +128,7 @@ class GpuPartRasterizer {
             return [] as Array<GpuRasterizedPartData | null>;
         }
 
-        this.ensurePipeline(device);
+        this.ensurePipelines(device);
         const prepareStart = performance.now();
         const preparedRequests = this.prepareRequests(requests);
         const prepareMs = performance.now() - prepareStart;
@@ -142,8 +148,8 @@ class GpuPartRasterizer {
 
         const encodeStart = performance.now();
         const commandEncoder = device.createCommandEncoder();
-        const computePass = commandEncoder.beginComputePass();
-        computePass.setPipeline(this.pipeline);
+        const rasterPass = commandEncoder.beginComputePass();
+        rasterPass.setPipeline(this.rasterPipeline);
 
         preparedRequests.forEach((request) => {
             const triangleBuffer = this.createBuffer(device, request.triangleData, GPUBufferUsageStorage | GPUBufferUsageCopyDst);
@@ -166,23 +172,66 @@ class GpuPartRasterizer {
                 GPUBufferUsageUniform | GPUBufferUsageCopyDst,
             );
             const bindGroup = device.createBindGroup({
-                layout: this.bindGroupLayout,
+                layout: this.rasterBindGroupLayout,
                 entries: [
                     { binding: 0, resource: { buffer: triangleBuffer } },
                     { binding: 1, resource: { buffer: uniformBuffer } },
                     { binding: 2, resource: this.maskTexture.createView() },
-                    { binding: 3, resource: this.depthTexture.createView() },
+                    { binding: 3, resource: this.rawDepthTexture.createView() },
                 ],
             });
 
-            computePass.setBindGroup(0, bindGroup);
-            computePass.dispatchWorkgroups(
+            rasterPass.setBindGroup(0, bindGroup);
+            rasterPass.dispatchWorkgroups(
                 Math.ceil(request.bounds.width / WORKGROUP_SIZE),
                 Math.ceil(request.bounds.height / WORKGROUP_SIZE),
             );
         });
 
-        computePass.end();
+        rasterPass.end();
+
+        const completionPass = commandEncoder.beginComputePass();
+        completionPass.setPipeline(this.completionPipeline);
+        preparedRequests.forEach((request) => {
+            const completionUniformBuffer = this.createBuffer(
+                device,
+                new Float32Array([
+                    request.bounds.offsetX,
+                    request.bounds.offsetY,
+                    request.bounds.width,
+                    request.bounds.height,
+                    request.atlasX,
+                    request.atlasY,
+                    request.orientedBounds.center.x,
+                    request.orientedBounds.center.y,
+                    request.orientedBounds.axisX.x,
+                    request.orientedBounds.axisX.y,
+                    request.orientedBounds.axisY.x,
+                    request.orientedBounds.axisY.y,
+                    request.orientedBounds.extentX,
+                    request.orientedBounds.extentY,
+                    0,
+                    0,
+                ]),
+                GPUBufferUsageUniform | GPUBufferUsageCopyDst,
+            );
+            const completionBindGroup = device.createBindGroup({
+                layout: this.completionBindGroupLayout,
+                entries: [
+                    { binding: 0, resource: this.maskTexture.createView() },
+                    { binding: 1, resource: this.rawDepthTexture.createView() },
+                    { binding: 2, resource: this.completedDepthTexture.createView() },
+                    { binding: 3, resource: { buffer: completionUniformBuffer } },
+                ],
+            });
+
+            completionPass.setBindGroup(0, completionBindGroup);
+            completionPass.dispatchWorkgroups(
+                Math.ceil(request.bounds.width / WORKGROUP_SIZE),
+                Math.ceil(request.bounds.height / WORKGROUP_SIZE),
+            );
+        });
+        completionPass.end();
 
         const maskBytesPerRow = Math.ceil((atlasWidth * 4) / 256) * 256;
         const maskReadbackBuffer = device.createBuffer({
@@ -237,12 +286,12 @@ class GpuPartRasterizer {
         return this.devicePromise;
     }
 
-    private ensurePipeline(device: GPUDeviceLike) {
-        if (this.pipeline) {
+    private ensurePipelines(device: GPUDeviceLike) {
+        if (this.rasterPipeline && this.completionPipeline) {
             return;
         }
 
-        this.pipeline = device.createComputePipeline({
+        this.rasterPipeline = device.createComputePipeline({
             layout: 'auto',
             compute: {
                 module: device.createShaderModule({
@@ -336,13 +385,134 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
                 entryPoint: 'main',
             },
         });
-        this.bindGroupLayout = this.pipeline.getBindGroupLayout(0);
+        this.rasterBindGroupLayout = this.rasterPipeline.getBindGroupLayout(0);
+
+        this.completionPipeline = device.createComputePipeline({
+            layout: 'auto',
+            compute: {
+                module: device.createShaderModule({
+                    code: `
+struct Uniforms {
+    offsetX: f32,
+    offsetY: f32,
+    width: f32,
+    height: f32,
+    atlasX: f32,
+    atlasY: f32,
+    centerX: f32,
+    centerY: f32,
+    axisXx: f32,
+    axisXy: f32,
+    axisYx: f32,
+    axisYy: f32,
+    extentX: f32,
+    extentY: f32,
+    padding0: vec2<f32>,
+}
+
+@group(0) @binding(0) var maskAtlas: texture_2d<f32>;
+@group(0) @binding(1) var rawDepthAtlas: texture_2d<f32>;
+@group(0) @binding(2) var completedDepthAtlas: texture_storage_2d<r32float, write>;
+@group(0) @binding(3) var<uniform> uniforms: Uniforms;
+
+fn clampPixel(x: i32, lower: i32, upper: i32) -> i32 {
+    return max(lower, min(upper, x));
+}
+
+fn isValid(atlasCoord: vec2<i32>) -> bool {
+    return textureLoad(maskAtlas, atlasCoord, 0).a > 0.5;
+}
+
+fn sampleRawDepth(atlasCoord: vec2<i32>) -> f32 {
+    return textureLoad(rawDepthAtlas, atlasCoord, 0).r;
+}
+
+fn isInsideObb(samplePoint: vec2<f32>) -> bool {
+    let center = vec2<f32>(uniforms.centerX, uniforms.centerY);
+    let axisX = vec2<f32>(uniforms.axisXx, uniforms.axisXy);
+    let axisY = vec2<f32>(uniforms.axisYx, uniforms.axisYy);
+    let delta = samplePoint - center;
+    let localX = dot(delta, axisX);
+    let localY = dot(delta, axisY);
+    return abs(localX) <= uniforms.extentX && abs(localY) <= uniforms.extentY;
+}
+
+fn screenToAtlasCoord(samplePoint: vec2<f32>) -> vec2<i32> {
+    let localX = clampPixel(
+        i32(floor(samplePoint.x - uniforms.offsetX)),
+        0,
+        i32(uniforms.width) - 1,
+    );
+    let localY = clampPixel(
+        i32(floor(samplePoint.y - uniforms.offsetY)),
+        0,
+        i32(uniforms.height) - 1,
+    );
+    return vec2<i32>(i32(uniforms.atlasX) + localX, i32(uniforms.atlasY) + localY);
+}
+
+fn searchTowardCenter(samplePoint: vec2<f32>) -> f32 {
+    let center = vec2<f32>(uniforms.centerX, uniforms.centerY);
+    let direction = center - samplePoint;
+    let lengthToCenter = length(direction);
+    if (lengthToCenter <= 0.5) {
+        let centerCoord = screenToAtlasCoord(center);
+        return select(1e20, sampleRawDepth(centerCoord), isValid(centerCoord));
+    }
+
+    let stepCount = max(1, i32(ceil(lengthToCenter)));
+    for (var stepIndex = 0; stepIndex <= stepCount; stepIndex += 1) {
+        let t = f32(stepIndex) / f32(stepCount);
+        let queryPoint = samplePoint + direction * t;
+        let queryCoord = screenToAtlasCoord(queryPoint);
+        if (isValid(queryCoord)) {
+            return sampleRawDepth(queryCoord);
+        }
+    }
+
+    return 1e20;
+}
+
+@compute @workgroup_size(${WORKGROUP_SIZE}, ${WORKGROUP_SIZE}, 1)
+fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
+    if (f32(globalId.x) >= uniforms.width || f32(globalId.y) >= uniforms.height) {
+        return;
+    }
+
+    let atlasCoord = vec2<i32>(i32(uniforms.atlasX) + i32(globalId.x), i32(uniforms.atlasY) + i32(globalId.y));
+    if (isValid(atlasCoord)) {
+        textureStore(completedDepthAtlas, atlasCoord, vec4<f32>(sampleRawDepth(atlasCoord), 0.0, 0.0, 0.0));
+        return;
+    }
+
+    let samplePoint = vec2<f32>(
+        uniforms.offsetX + f32(globalId.x) + 0.5,
+        uniforms.offsetY + f32(globalId.y) + 0.5
+    );
+    if (!isInsideObb(samplePoint)) {
+        textureStore(completedDepthAtlas, atlasCoord, vec4<f32>(1e20, 0.0, 0.0, 0.0));
+        return;
+    }
+
+    textureStore(
+        completedDepthAtlas,
+        atlasCoord,
+        vec4<f32>(searchTowardCenter(samplePoint), 0.0, 0.0, 0.0),
+    );
+}
+                    `,
+                }),
+                entryPoint: 'main',
+            },
+        });
+        this.completionBindGroupLayout = this.completionPipeline.getBindGroupLayout(0);
     }
 
     private ensureAtlasTextures(device: GPUDeviceLike, atlasWidth: number, atlasHeight: number) {
         if (
             this.maskTexture &&
-            this.depthTexture &&
+            this.rawDepthTexture &&
+            this.completedDepthTexture &&
             this.atlasWidth === atlasWidth &&
             this.atlasHeight === atlasHeight
         ) {
@@ -350,17 +520,23 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
         }
 
         this.maskTexture?.destroy();
-        this.depthTexture?.destroy();
+        this.rawDepthTexture?.destroy();
+        this.completedDepthTexture?.destroy();
 
         this.maskTexture = device.createTexture({
             size: { width: atlasWidth, height: atlasHeight, depthOrArrayLayers: 1 },
             format: MASK_FORMAT,
             usage: GPUTextureUsageStorageBinding | GPUTextureUsageTextureBinding | GPUTextureUsageCopySrc,
         });
-        this.depthTexture = device.createTexture({
+        this.rawDepthTexture = device.createTexture({
             size: { width: atlasWidth, height: atlasHeight, depthOrArrayLayers: 1 },
             format: DEPTH_FORMAT,
             usage: GPUTextureUsageStorageBinding | GPUTextureUsageTextureBinding | GPUTextureUsageCopySrc,
+        });
+        this.completedDepthTexture = device.createTexture({
+            size: { width: atlasWidth, height: atlasHeight, depthOrArrayLayers: 1 },
+            format: DEPTH_FORMAT,
+            usage: GPUTextureUsageStorageBinding | GPUTextureUsageTextureBinding,
         });
         this.atlasWidth = atlasWidth;
         this.atlasHeight = atlasHeight;
@@ -379,10 +555,15 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
                 return;
             }
 
+            const projectedVertices = new Map<number, { x: number; y: number }>();
             const triangleData = new Float32Array(request.part.triangles.length * 12);
             let offset = 0;
             request.part.triangles.forEach((triangle) => {
                 triangle.vertexIndices.forEach((vertexIndex) => {
+                    projectedVertices.set(vertexIndex, {
+                        x: request.projectionCache.screenX[vertexIndex],
+                        y: request.projectionCache.screenY[vertexIndex],
+                    });
                     triangleData[offset] = request.projectionCache.screenX[vertexIndex];
                     triangleData[offset + 1] = request.projectionCache.screenY[vertexIndex];
                     triangleData[offset + 2] = request.projectionCache.depth[vertexIndex];
@@ -390,6 +571,10 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
                     offset += 4;
                 });
             });
+            const orientedBounds = computeOrientedBounds2D([...projectedVertices.values()]);
+            if (!orientedBounds) {
+                return;
+            }
 
             if (cursorX > 0 && cursorX + bounds.width > atlasMaxWidth) {
                 cursorX = 0;
@@ -404,6 +589,7 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
                 atlasY: cursorY,
                 nearestDepth: this.computeNearestDepth(request.part, request.projectionCache, request.fallbackDepth),
                 triangleData,
+                orientedBounds,
             });
 
             cursorX += bounds.width + ATLAS_PADDING;
@@ -445,6 +631,7 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
             atlasY: request.atlasY,
             atlasWidth,
             atlasHeight,
+            orientedBounds: request.orientedBounds,
         } satisfies GpuRasterizedPartData;
     }
 
@@ -474,12 +661,12 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
     }
 
     getDepthAtlasState(): GpuDepthAtlasState | null {
-        if (!this.depthTexture) {
+        if (!this.completedDepthTexture) {
             return null;
         }
 
         return {
-            texture: this.depthTexture,
+            texture: this.completedDepthTexture,
             width: this.atlasWidth,
             height: this.atlasHeight,
         };

@@ -32,6 +32,7 @@ type PreparedShape = {
         atlasWidth: number;
         atlasHeight: number;
     };
+    orientedBounds: ProjectedPartShape['orientedBounds'];
     loopRanges: Uint32Array;
     loopPoints: Float32Array;
 };
@@ -140,6 +141,7 @@ const buildPreparedShape = (
         bounds,
         rasterBounds: shape.rasterBounds,
         atlasRegion: shape.atlasRegion,
+        orientedBounds: shape.orientedBounds,
         loopRanges: flattenedLoops.loopRanges,
         loopPoints: flattenedLoops.loopPoints,
     };
@@ -353,6 +355,8 @@ struct Uniforms {
     viewportStroke: vec4<f32>,
     rasterBounds: vec4<f32>,
     atlasRegion: vec4<f32>,
+    obbCenterExtents: vec4<f32>,
+    obbAxisXy: vec4<f32>,
     color: vec4<f32>,
     edgeColor: vec4<f32>,
 }
@@ -449,13 +453,42 @@ fn isBoundary(screenPosition: vec2<f32>) -> bool {
 }
 
 fn sampleDepthNdc(screenPosition: vec2<f32>) -> f32 {
+    let rawLocalX = screenPosition.x - uniforms.rasterBounds.x;
+    let rawLocalY = screenPosition.y - uniforms.rasterBounds.y;
+    var sampleScreen = screenPosition;
+
+    if (
+        rawLocalX < 0.0 ||
+        rawLocalY < 0.0 ||
+        rawLocalX >= uniforms.rasterBounds.z ||
+        rawLocalY >= uniforms.rasterBounds.w
+    ) {
+        let center = uniforms.obbCenterExtents.xy;
+        let extents = uniforms.obbCenterExtents.zw;
+        let axisX = uniforms.obbAxisXy.xy;
+        let axisY = uniforms.obbAxisXy.zw;
+        let delta = screenPosition - center;
+        let localObb = vec2<f32>(dot(delta, axisX), dot(delta, axisY));
+        let scale = max(
+            abs(localObb.x) / max(extents.x, 0.5),
+            abs(localObb.y) / max(extents.y, 0.5),
+        );
+        if (scale > 1.0) {
+            let boundaryLocal = localObb / scale;
+            sampleScreen =
+                center +
+                axisX * boundaryLocal.x +
+                axisY * boundaryLocal.y;
+        }
+    }
+
     let atlasLocalX = clampPixel(
-        i32(floor(screenPosition.x - uniforms.rasterBounds.x)),
+        i32(floor(sampleScreen.x - uniforms.rasterBounds.x)),
         0,
         i32(uniforms.rasterBounds.z) - 1,
     );
     let atlasLocalY = clampPixel(
-        i32(floor(screenPosition.y - uniforms.rasterBounds.y)),
+        i32(floor(sampleScreen.y - uniforms.rasterBounds.y)),
         0,
         i32(uniforms.rasterBounds.w) - 1,
     );
@@ -463,7 +496,44 @@ fn sampleDepthNdc(screenPosition: vec2<f32>) -> f32 {
         i32(uniforms.atlasRegion.x) + atlasLocalX,
         i32(uniforms.atlasRegion.y) + atlasLocalY,
     );
-    return textureLoad(depthAtlasTexture, atlasCoords, 0).r;
+    let depth = textureLoad(depthAtlasTexture, atlasCoords, 0).r;
+    if (depth < 1e19) {
+        return depth;
+    }
+
+    let center = uniforms.obbCenterExtents.xy;
+    let extents = uniforms.obbCenterExtents.zw;
+    let axisX = uniforms.obbAxisXy.xy;
+    let axisY = uniforms.obbAxisXy.zw;
+    let delta = screenPosition - center;
+    let localObb = vec2<f32>(dot(delta, axisX), dot(delta, axisY));
+    let scale = max(
+        max(
+            abs(localObb.x) / max(extents.x, 0.5),
+            abs(localObb.y) / max(extents.y, 0.5),
+        ),
+        1.0,
+    );
+    let boundaryLocal = localObb / scale;
+    let boundaryScreen =
+        center +
+        axisX * boundaryLocal.x +
+        axisY * boundaryLocal.y;
+    let boundaryLocalX = clampPixel(
+        i32(floor(boundaryScreen.x - uniforms.rasterBounds.x)),
+        0,
+        i32(uniforms.rasterBounds.z) - 1,
+    );
+    let boundaryLocalY = clampPixel(
+        i32(floor(boundaryScreen.y - uniforms.rasterBounds.y)),
+        0,
+        i32(uniforms.rasterBounds.w) - 1,
+    );
+    let boundaryAtlasCoords = vec2<i32>(
+        i32(uniforms.atlasRegion.x) + boundaryLocalX,
+        i32(uniforms.atlasRegion.y) + boundaryLocalY,
+    );
+    return textureLoad(depthAtlasTexture, boundaryAtlasCoords, 0).r;
 }
 
 @vertex
@@ -622,6 +692,14 @@ fn fragmentMain(input: VertexOutput) -> FragmentOutput {
                 shape.atlasRegion.atlasY,
                 depthAtlas.width,
                 depthAtlas.height,
+                shape.orientedBounds.center.x,
+                shape.orientedBounds.center.y,
+                shape.orientedBounds.extentX,
+                shape.orientedBounds.extentY,
+                shape.orientedBounds.axisX.x,
+                shape.orientedBounds.axisX.y,
+                shape.orientedBounds.axisY.x,
+                shape.orientedBounds.axisY.y,
                 ...shape.color,
                 ...EDGE_COLOR,
             ]),
