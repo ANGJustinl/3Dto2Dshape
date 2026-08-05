@@ -16,11 +16,11 @@ import {
     type ProjectionPartSource,
 } from './lib/modelParts';
 import {
-    createProjectionMaskState,
     type ProjectionMaskState,
     type ProjectionOverlaySettings,
-} from './lib/partProjection';
-import { getWebGpuScreenProjector } from './lib/webgpuScreenProjector';
+} from './lib/2DRenderShared/types';
+import { createProjectionMaskState } from './lib/2DRenderShared/maskState';
+import { getWebGpuScreenProjector } from './lib/2DRenderStages/meshProjection/projector';
 
 type MaterialState = {
     visible: boolean;

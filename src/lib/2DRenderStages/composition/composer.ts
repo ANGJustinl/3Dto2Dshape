@@ -1,7 +1,7 @@
-import type { GpuDepthAtlasState } from './gpuPartRasterizer';
-import type { ProjectedPartShape, ProjectionOverlaySettings } from './partProjection';
-import { recordPerfSample } from './perfLogger';
-import { getSharedWebGpuContext } from './webgpuShared';
+import type { GpuDepthAtlasState } from '../partRasterization/rasterizer';
+import type { ProjectedPartShape, ProjectionOverlaySettings } from '../../2DRenderShared/types';
+import { recordPerfSample } from '../../perfLogger';
+import { getSharedWebGpuContext } from '../../webgpuShared';
 
 type GPUCanvasContextLike = any;
 type GPUDeviceLike = any;

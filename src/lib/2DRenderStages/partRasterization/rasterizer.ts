@@ -1,8 +1,8 @@
-import type { ProjectionPartSource } from './modelParts';
-import { computeOrientedBounds2D, type OrientedBounds2D } from './orientedBounds';
-import type { MeshProjectionCache } from './partProjection';
-import { recordPerfSample } from './perfLogger';
-import { getSharedWebGpuContext } from './webgpuShared';
+import type { ProjectionPartSource } from '../../modelParts';
+import { computeOrientedBounds2D, type OrientedBounds2D } from '../../orientedBounds';
+import type { MeshProjectionCache } from '../../2DRenderShared/types';
+import { recordPerfSample } from '../../perfLogger';
+import { getSharedWebGpuContext } from '../../webgpuShared';
 
 type GPUBufferLike = any;
 type GPUComputePipelineLike = any;

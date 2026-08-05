@@ -1,6 +1,6 @@
 import * as THREE from 'three';
-import type { MeshProjectionCache } from './partProjection';
-import type { ProjectionPartSource } from './modelParts';
+import type { MeshProjectionCache } from '../../2DRenderShared/types';
+import type { ProjectionPartSource } from '../../modelParts';
 
 type MeshLike = THREE.Mesh | THREE.SkinnedMesh;
 

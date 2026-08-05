@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { MaterialDebugInfo, PartNode } from '../lib/modelParts';
-import type { ProjectionOverlaySettings } from '../lib/partProjection';
+import type { ProjectionOverlaySettings } from '../lib/2DRenderShared/types';
 
 type PartPanelProps = {
   parts: PartNode[];
