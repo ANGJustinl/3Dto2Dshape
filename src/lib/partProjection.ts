@@ -22,13 +22,6 @@ export type ProjectedPartShape = {
     color: string;
     depth: number;
     loops: Array<Array<{ x: number; y: number }>>;
-    coverageMask: {
-        width: number;
-        height: number;
-        offsetX: number;
-        offsetY: number;
-        values: Uint8Array;
-    };
     rasterBounds: {
         width: number;
         height: number;
@@ -621,13 +614,6 @@ const buildProjectedPartShapeFromRasterData = (
         color: part.color,
         depth: rasterData.nearestDepth,
         loops,
-        coverageMask: {
-            width: rasterData.width,
-            height: rasterData.height,
-            offsetX: rasterData.offsetX,
-            offsetY: rasterData.offsetY,
-            values: rasterData.occupied,
-        },
         rasterBounds: {
             width: rasterData.width,
             height: rasterData.height,
@@ -684,7 +670,10 @@ export const collectProjectedPartShapesForGpuFrame = async (
             (visibleLeafIds ? visibleLeafIds.has(part.leafId) : true),
     );
     if (filteredParts.length === 0) {
-        return [];
+        return {
+            shapes: [],
+            depthAtlas: null,
+        };
     }
 
     const rasterizer = getGpuPartRasterizer();
