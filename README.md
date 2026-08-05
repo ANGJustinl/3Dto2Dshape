@@ -5,7 +5,7 @@ flowchart TD
     A["Frame Scheduling (CPU)"]
     B["Mesh Projection (GPU)"]
     C["Part Rasterization (GPU)"]
-    D["Part Build (CPU)"]
+    D["Part Shaping (CPU)"]
     E["Part Filtering (CPU)"]
     F["Composition (GPU)"]
     G["Right Canvas"]
