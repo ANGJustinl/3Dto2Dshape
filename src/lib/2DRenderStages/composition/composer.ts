@@ -50,8 +50,9 @@ const GPUBufferUsageUniform = 0x0040;
 const GPUBufferUsageVertex = 0x0020;
 const GPUBufferUsageCopyDst = 0x0008;
 const GPUBufferUsageStorage = 0x0080;
-const EDGE_COLOR: [number, number, number, number] = [16 / 255, 16 / 255, 16 / 255, 1];
-
+const GPUShaderStageVertex = 0x1;
+const GPUShaderStageFragment = 0x2;
+const GPUTextureUsageRenderAttachment = 0x0010;
 const hexToRgba = (hex: string, alpha: number): [number, number, number, number] => {
     const normalized = hex.startsWith('#') ? hex.slice(1) : hex;
     return [
@@ -194,6 +195,7 @@ export class GpuOverlayComposer {
         this.configureCanvas(canvas, device, viewportWidth, viewportHeight);
         this.ensureDepthTexture(device, canvas.width, canvas.height);
         this.ensurePipelines(device);
+        const background = hexToRgba(settings.backgroundColor, 1);
 
         const resourceStart = performance.now();
         const resources = preparedShapes.map((shape) =>
@@ -215,7 +217,12 @@ export class GpuOverlayComposer {
             colorAttachments: [
                 {
                     view: currentTexture.createView(),
-                    clearValue: { r: 0, g: 0, b: 0, a: 0 },
+                    clearValue: {
+                        r: background[0],
+                        g: background[1],
+                        b: background[2],
+                        a: background[3],
+                    },
                     loadOp: 'clear',
                     storeOp: 'store',
                 },
@@ -269,16 +276,25 @@ export class GpuOverlayComposer {
         return true;
     }
 
-    async clear(canvas: HTMLCanvasElement, viewportWidth: number, viewportHeight: number) {
+    async clear(
+        canvas: HTMLCanvasElement,
+        viewportWidth: number,
+        viewportHeight: number,
+        settings?: ProjectionOverlaySettings,
+    ) {
         if (viewportWidth <= 0 || viewportHeight <= 0) {
             return;
         }
 
         const device = await this.getDevice();
+        const background = hexToRgba(settings?.backgroundColor ?? '#FFFDF8', 1);
         if (!device) {
             const context = canvas.getContext('2d');
             context?.setTransform(1, 0, 0, 1, 0, 0);
-            context?.clearRect(0, 0, canvas.width, canvas.height);
+            if (context) {
+                context.fillStyle = settings?.backgroundColor ?? '#FFFDF8';
+                context.fillRect(0, 0, canvas.width, canvas.height);
+            }
             return;
         }
 
@@ -289,7 +305,12 @@ export class GpuOverlayComposer {
             colorAttachments: [
                 {
                     view: currentTexture.createView(),
-                    clearValue: { r: 0, g: 0, b: 0, a: 0 },
+                    clearValue: {
+                        r: background[0],
+                        g: background[1],
+                        b: background[2],
+                        a: background[3],
+                    },
                     loadOp: 'clear',
                     storeOp: 'store',
                 },
@@ -569,22 +590,22 @@ fn fragmentMain(input: VertexOutput) -> FragmentOutput {
             entries: [
                 {
                     binding: 0,
-                    visibility: GPUShaderStage.FRAGMENT,
+                    visibility: GPUShaderStageFragment,
                     buffer: { type: 'read-only-storage' },
                 },
                 {
                     binding: 1,
-                    visibility: GPUShaderStage.FRAGMENT,
+                    visibility: GPUShaderStageFragment,
                     buffer: { type: 'read-only-storage' },
                 },
                 {
                     binding: 2,
-                    visibility: GPUShaderStage.FRAGMENT,
+                    visibility: GPUShaderStageFragment,
                     texture: { sampleType: 'unfilterable-float' },
                 },
                 {
                     binding: 3,
-                    visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
+                    visibility: GPUShaderStageVertex | GPUShaderStageFragment,
                     buffer: { type: 'uniform' },
                 },
             ],
@@ -613,7 +634,23 @@ fn fragmentMain(input: VertexOutput) -> FragmentOutput {
             fragment: {
                 module: shaderModule,
                 entryPoint: 'fragmentMain',
-                targets: [{ format: this.format }],
+                targets: [
+                    {
+                        format: this.format,
+                        blend: {
+                            color: {
+                                srcFactor: 'src-alpha',
+                                dstFactor: 'one-minus-src-alpha',
+                                operation: 'add',
+                            },
+                            alpha: {
+                                srcFactor: 'one',
+                                dstFactor: 'one-minus-src-alpha',
+                                operation: 'add',
+                            },
+                        },
+                    },
+                ],
             },
             primitive: {
                 topology: 'triangle-list',
@@ -638,7 +675,7 @@ fn fragmentMain(input: VertexOutput) -> FragmentOutput {
         this.depthTexture = device.createTexture({
             size: { width, height },
             format: 'depth24plus',
-            usage: GPUTextureUsage.RENDER_ATTACHMENT,
+            usage: GPUTextureUsageRenderAttachment,
         });
         this.depthTextureWidth = width;
         this.depthTextureHeight = height;
@@ -700,8 +737,8 @@ fn fragmentMain(input: VertexOutput) -> FragmentOutput {
                 shape.orientedBounds.axisX.y,
                 shape.orientedBounds.axisY.x,
                 shape.orientedBounds.axisY.y,
-                ...shape.color,
-                ...EDGE_COLOR,
+                 ...shape.color,
+                 ...hexToRgba(settings.outlineColor, settings.outlineOpacity),
             ]),
             GPUBufferUsageUniform | GPUBufferUsageCopyDst,
         );

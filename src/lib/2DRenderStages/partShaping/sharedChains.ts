@@ -71,13 +71,14 @@ export const buildProjectedSharedChainsForPart = (
 ) => {
     const mask = new Uint8Array(bounds.width * bounds.height);
     const chains: ProjectedSharedChain[] = [];
+    const sourceLeafId = part.sourceLeafId ?? leafId;
 
     state.sharedChains.forEach((chain) => {
         if (chain.mesh !== part.mesh) {
             return;
         }
 
-        if (chain.leafIds[0] !== leafId && chain.leafIds[1] !== leafId) {
+        if (chain.leafIds[0] !== sourceLeafId && chain.leafIds[1] !== sourceLeafId) {
             return;
         }
 

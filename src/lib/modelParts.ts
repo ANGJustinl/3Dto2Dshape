@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import type { PaintLayerKind } from './2DRenderShared/types';
 
 export type PartNode = {
     id: string;
@@ -68,6 +69,8 @@ export type ProjectionTriangleSource = {
 
 export type ProjectionPartSource = {
     leafId: string;
+    sourceLeafId?: string;
+    paintLayer?: PaintLayerKind;
     mesh: THREE.Mesh | THREE.SkinnedMesh;
     triangleCount: number;
     color: string;
@@ -110,8 +113,8 @@ const MODEL_MATERIAL_EXCLUSION_KEYWORDS: Record<string, string[]> = {
 
 const COLOR_EDGE_BUCKET_SIZE = 4;
 const COLOR_LOCAL_THRESHOLD = 64;
-const SMALL_REGION_TRIANGLE_LIMIT = 2;
-const SMALL_REGION_MERGE_THRESHOLD = 72;
+const SMALL_REGION_TRIANGLE_LIMIT = 1;
+const SMALL_REGION_MERGE_THRESHOLD = 48;
 const TRIANGLE_COLOR_SAMPLE_MODE = 'uv-multi-sample-interior-average';
 const POSITION_KEY_EPSILON = 1e-4;
 const TRIANGLE_INTERIOR_SAMPLE_BARYCENTRICS: Array<[number, number, number]> = [
@@ -1198,7 +1201,7 @@ const buildMeshSegmentation = (
                     count,
                     materialIndex: nextMaterials.length - 1,
                 });
-                if (cluster.triangles.length >= 4) {
+                if (cluster.triangles.length >= 1) {
                     projectionParts.push({
                         leafId,
                         mesh,

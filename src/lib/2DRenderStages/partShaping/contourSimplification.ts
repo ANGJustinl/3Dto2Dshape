@@ -169,11 +169,12 @@ const matchSharedChainToSegment = (
         });
     });
 
-    if (!bestMatch || bestMatch.score > 4) {
+    const match = bestMatch as { points: Point2D[]; score: number } | null;
+    if (match === null || match.score > 4) {
         return null;
     }
 
-    return bestMatch.points;
+    return match.points;
 };
 
 export const simplifyLoopByAnchorIndices = (

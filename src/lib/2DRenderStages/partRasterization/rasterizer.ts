@@ -4,14 +4,13 @@ import type { MeshProjectionCache } from '../../2DRenderShared/types';
 import { recordPerfSample } from '../../perfLogger';
 import { getSharedWebGpuContext } from '../../webgpuShared';
 
-type GPUBufferLike = any;
 type GPUComputePipelineLike = any;
 type GPUDeviceLike = any;
-type GPUBindGroupLike = any;
 type GPUTextureLike = any;
 
 export type GpuRasterizedPartData = {
     occupied: Uint8Array;
+    depth: Float32Array;
     nearestDepth: number;
     width: number;
     height: number;
@@ -65,8 +64,6 @@ const GPUBufferUsageMapRead = 0x0001;
 const GPUTextureUsageStorageBinding = 0x0008;
 const GPUTextureUsageTextureBinding = 0x0004;
 const GPUTextureUsageCopySrc = 0x0001;
-
-const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
 
 const computePartBounds = (
     part: ProjectionPartSource,
@@ -239,19 +236,32 @@ class GpuPartRasterizer {
             size: maskBytesPerRow * atlasHeight,
             usage: GPUBufferUsageMapRead | GPUBufferUsageCopyDst,
         });
+        const depthBytesPerRow = Math.ceil((atlasWidth * 4) / 256) * 256;
+        const depthReadbackBuffer = device.createBuffer({
+            size: depthBytesPerRow * atlasHeight,
+            usage: GPUBufferUsageMapRead | GPUBufferUsageCopyDst,
+        });
         commandEncoder.copyTextureToBuffer(
             { texture: this.maskTexture },
             { buffer: maskReadbackBuffer, bytesPerRow: maskBytesPerRow, rowsPerImage: atlasHeight },
+            { width: atlasWidth, height: atlasHeight, depthOrArrayLayers: 1 },
+        );
+        commandEncoder.copyTextureToBuffer(
+            { texture: this.rawDepthTexture },
+            { buffer: depthReadbackBuffer, bytesPerRow: depthBytesPerRow, rowsPerImage: atlasHeight },
             { width: atlasWidth, height: atlasHeight, depthOrArrayLayers: 1 },
         );
         const encodeMs = performance.now() - encodeStart;
 
         const submitReadbackStart = performance.now();
         device.queue.submit([commandEncoder.finish()]);
-        await maskReadbackBuffer.mapAsync(1);
+        await Promise.all([maskReadbackBuffer.mapAsync(1), depthReadbackBuffer.mapAsync(1)]);
         const maskPixels = new Uint8Array(maskReadbackBuffer.getMappedRange().slice(0));
+        const depthPixels = new Uint8Array(depthReadbackBuffer.getMappedRange().slice(0));
         maskReadbackBuffer.unmap();
+        depthReadbackBuffer.unmap();
         maskReadbackBuffer.destroy();
+        depthReadbackBuffer.destroy();
         const submitReadbackMs = performance.now() - submitReadbackStart;
 
         const extractStart = performance.now();
@@ -260,6 +270,8 @@ class GpuPartRasterizer {
             results[request.sourceIndex] = this.extractRasterizedData(
                 maskPixels,
                 maskBytesPerRow,
+                depthPixels,
+                depthBytesPerRow,
                 request,
                 atlasWidth,
                 atlasHeight,
@@ -605,11 +617,16 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
     private extractRasterizedData(
         maskPixels: Uint8Array,
         maskBytesPerRow: number,
+        depthPixels: Uint8Array,
+        depthBytesPerRow: number,
         request: PreparedRequest,
         atlasWidth: number,
         atlasHeight: number,
     ) {
         const occupied = new Uint8Array(request.bounds.width * request.bounds.height);
+        const depth = new Float32Array(request.bounds.width * request.bounds.height);
+        depth.fill(Number.POSITIVE_INFINITY);
+        const depthView = new DataView(depthPixels.buffer, depthPixels.byteOffset, depthPixels.byteLength);
 
         for (let localY = 0; localY < request.bounds.height; localY += 1) {
             const atlasRow = request.atlasY + localY;
@@ -620,11 +637,16 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
                     continue;
                 }
                 occupied[targetIndex] = 1;
+                depth[targetIndex] = depthView.getFloat32(
+                    atlasRow * depthBytesPerRow + (request.atlasX + localX) * 4,
+                    true,
+                );
             }
         }
 
         return {
             occupied,
+            depth,
             nearestDepth: request.nearestDepth,
             width: request.bounds.width,
             height: request.bounds.height,

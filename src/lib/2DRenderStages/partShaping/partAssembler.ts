@@ -10,6 +10,7 @@ import type {
 import { buildProjectedSharedChainsForPart } from './sharedChains';
 import { collectContourAnchorIndices, simplifyLoopByAnchorIndices } from './contourSimplification';
 import { extractLoopsFromMask } from './contourExtraction';
+import { perturbPaintLoop } from '../../2DRenderShared/paintStyle';
 
 export const buildProjectedPartShapeFromRasterData = (
     part: ProjectionPartSource,
@@ -56,7 +57,7 @@ export const buildProjectedPartShapeFromRasterData = (
                 rasterData.offsetY,
             );
 
-            return simplifyLoopByAnchorIndices(
+            const simplified = simplifyLoopByAnchorIndices(
                 loop,
                 anchorIndices,
                 settings.simplifyEpsilon,
@@ -66,6 +67,16 @@ export const buildProjectedPartShapeFromRasterData = (
                 rasterData.height,
                 rasterData.offsetX,
                 rasterData.offsetY,
+            );
+
+            const seed = [...part.leafId].reduce(
+                (total, character) => total + character.charCodeAt(0),
+                0,
+            );
+            return perturbPaintLoop(
+                simplified,
+                projectedSharedChains.chains.length === 0 ? settings.edgeRoughness : 0,
+                seed,
             );
         })
         .filter((loop) => loop.length >= 3 && Math.abs(polygonArea(loop)) > 6);
@@ -86,6 +97,8 @@ export const buildProjectedPartShapeFromRasterData = (
     const finalizeShapeStart = performance.now();
     const shape = {
         leafId: part.leafId,
+        sourceLeafId: part.sourceLeafId ?? part.leafId,
+        paintLayer: part.paintLayer ?? 'base',
         color: part.color,
         depth: rasterData.nearestDepth,
         loops,

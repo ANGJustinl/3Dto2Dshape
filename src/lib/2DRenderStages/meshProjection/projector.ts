@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import type { MeshProjectionCache } from '../../2DRenderShared/types';
 import type { ProjectionPartSource } from '../../modelParts';
+import { getSharedWebGpuContext } from '../../webgpuShared';
 
 type MeshLike = THREE.Mesh | THREE.SkinnedMesh;
 
@@ -10,7 +11,6 @@ type MeshSnapshot = {
     matrixWorld: Float32Array;
     bindMatrix: Float32Array;
     bindMatrixInverse: Float32Array;
-    boneMatrices: Float32Array;
 };
 
 type GpuRequest = {
@@ -21,7 +21,6 @@ type GpuRequest = {
     meshSnapshots: MeshSnapshot[];
 };
 
-type GPUAdapterLike = any;
 type GPUBufferLike = any;
 type GPUBindGroupLike = any;
 type GPUComputePipelineLike = any;
@@ -29,7 +28,7 @@ type GPUDeviceLike = any;
 type GPUQueueLike = any;
 
 type MeshGpuResources = {
-    version: number;
+    version: string;
     vertexCount: number;
     positionsBuffer: GPUBufferLike;
     uniformsBuffer: GPUBufferLike;
@@ -48,7 +47,6 @@ export type ProjectionFrameResult = {
 const WORKGROUP_SIZE = 64;
 const FLOATS_PER_PROJECTED_VERTEX = 4;
 const FLOATS_PER_UNIFORMS = 16 * 4 + 4;
-const FLOATS_PER_MAT4 = 16;
 const GPUBufferUsageMapRead = 0x0001;
 const GPUBufferUsageCopySrc = 0x0004;
 const GPUBufferUsageCopyDst = 0x0008;
@@ -80,22 +78,6 @@ const toVec4FloatArray = (
     return data;
 };
 
-const toVec4UintArray = (
-    attribute: THREE.BufferAttribute | THREE.InterleavedBufferAttribute,
-) => {
-    const data = new Uint32Array(attribute.count * 4);
-    for (let index = 0; index < attribute.count; index += 1) {
-        const offset = index * 4;
-        data[offset] = attribute.getX(index);
-        data[offset + 1] = attribute.itemSize > 1 ? attribute.getY(index) : 0;
-        data[offset + 2] = attribute.itemSize > 2 ? attribute.getZ(index) : 0;
-        data[offset + 3] = attribute.itemSize > 3 ? attribute.getW(index) : 0;
-    }
-    return data;
-};
-
-const createZeroVec4UintArray = (vertexCount: number) => new Uint32Array(vertexCount * 4);
-const createZeroVec4FloatArray = (vertexCount: number) => new Float32Array(vertexCount * 4);
 const toSkinnedLocalPositions = (mesh: MeshLike) => {
     const positionAttribute = mesh.geometry.getAttribute('position');
     const positions = new Float32Array(positionAttribute.count * 4);
@@ -117,7 +99,6 @@ const toSkinnedLocalPositions = (mesh: MeshLike) => {
 };
 
 class WebGpuProjectionPipeline {
-    private adapterPromise: Promise<GPUAdapterLike | null> | null = null;
     private devicePromise: Promise<GPUDeviceLike | null> | null = null;
     private device: GPUDeviceLike | null = null;
     private queue: GPUQueueLike | null = null;
@@ -155,15 +136,15 @@ class WebGpuProjectionPipeline {
             camera.matrixWorldInverse,
         );
 
-        const meshSnapshots = meshes
-            .map((mesh) => {
+        const meshSnapshots: MeshSnapshot[] = [];
+        meshes.forEach((mesh) => {
                 const partLeafIds = (
                     mesh.userData as {
                         partLeafIdByMaterialIndex?: string[];
                     }
                 ).partLeafIdByMaterialIndex;
                 if (!partLeafIds || partLeafIds.length === 0) {
-                    return null;
+                    return;
                 }
 
                 mesh.updateWorldMatrix(true, false);
@@ -171,33 +152,22 @@ class WebGpuProjectionPipeline {
                 const bindMatrixInverse =
                     mesh instanceof THREE.SkinnedMesh ? mesh.bindMatrixInverse : new THREE.Matrix4();
 
-                let boneMatrices = new Float32Array(FLOATS_PER_MAT4);
-                boneMatrices.set([
-                    1, 0, 0, 0,
-                    0, 1, 0, 0,
-                    0, 0, 1, 0,
-                    0, 0, 0, 1,
-                ]);
-
                 if (mesh instanceof THREE.SkinnedMesh) {
                     mesh.skeleton.update();
-                    boneMatrices = new Float32Array(mesh.skeleton.boneMatrices);
                 }
 
                 if (partLeafIds.length === 0) {
-                    return null;
+                    return;
                 }
 
-                return {
+                meshSnapshots.push({
                     mesh,
                     positions: toSkinnedLocalPositions(mesh),
                     matrixWorld: new Float32Array(flattenMatrix4(mesh.matrixWorld)),
                     bindMatrix: new Float32Array(flattenMatrix4(bindMatrix)),
                     bindMatrixInverse: new Float32Array(flattenMatrix4(bindMatrixInverse)),
-                    boneMatrices,
-                } satisfies MeshSnapshot;
-            })
-            .filter((snapshot): snapshot is MeshSnapshot => snapshot !== null);
+                });
+            });
 
         if (meshSnapshots.length === 0) {
             return;
@@ -255,18 +225,6 @@ class WebGpuProjectionPipeline {
         this.inFlight = false;
     }
 
-    private async getAdapter() {
-        if (!this.adapterPromise) {
-            this.adapterPromise = (async () => {
-                const gpuNavigator = navigator as Navigator & {
-                    gpu?: { requestAdapter?: () => Promise<GPUAdapterLike | null> };
-                };
-                return (await gpuNavigator.gpu?.requestAdapter?.()) ?? null;
-            })();
-        }
-        return this.adapterPromise;
-    }
-
     private async getDevice() {
         if (this.device) {
             return this.device;
@@ -274,11 +232,10 @@ class WebGpuProjectionPipeline {
 
         if (!this.devicePromise) {
             this.devicePromise = (async () => {
-                const adapter = await this.getAdapter();
-                if (!adapter) {
+                const device = await getSharedWebGpuContext().getDevice();
+                if (!device) {
                     return null;
                 }
-                const device = await adapter.requestDevice();
                 this.device = device;
                 this.queue = device.queue;
                 this.computePipeline = this.createComputePipeline(device);
@@ -388,7 +345,7 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
 
         const cachesByMesh = new WeakMap<MeshLike, MeshProjectionCache>();
         await Promise.all(
-            meshResources.map(async ({ mesh, resource }) => {
+            meshResources.map(async ({ mesh, resource, snapshot }) => {
                 await resource.projectedReadbackBuffer.mapAsync(1);
                 const mapped = resource.projectedReadbackBuffer.getMappedRange();
                 const copied = new Float32Array(mapped.slice(0));
@@ -400,6 +357,7 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
                         resource.vertexCount,
                         request.viewportWidth,
                         request.viewportHeight,
+                        snapshot,
                     ),
                 );
             }),
@@ -428,7 +386,7 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
             return null;
         }
 
-        const currentVersion = geometry.version;
+        const currentVersion = geometry.uuid;
         const existing = this.resourcesByMesh.get(snapshot.mesh);
         if (existing && existing.version === currentVersion) {
             return existing;
@@ -529,16 +487,30 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
         vertexCount: number,
         viewportWidth: number,
         viewportHeight: number,
+        snapshot: MeshSnapshot,
     ): MeshProjectionCache {
         const screenX = new Float32Array(vertexCount);
         const screenY = new Float32Array(vertexCount);
         const depth = new Float32Array(vertexCount);
+        const worldX = new Float32Array(vertexCount);
+        const worldY = new Float32Array(vertexCount);
+        const worldZ = new Float32Array(vertexCount);
+        const worldMatrix = new THREE.Matrix4().fromArray(snapshot.matrixWorld);
+        const worldPosition = new THREE.Vector3();
 
         for (let vertexIndex = 0; vertexIndex < vertexCount; vertexIndex += 1) {
             const offset = vertexIndex * FLOATS_PER_PROJECTED_VERTEX;
             screenX[vertexIndex] = data[offset];
             screenY[vertexIndex] = data[offset + 1];
             depth[vertexIndex] = data[offset + 2];
+            worldPosition.set(
+                snapshot.positions[offset],
+                snapshot.positions[offset + 1],
+                snapshot.positions[offset + 2],
+            ).applyMatrix4(worldMatrix);
+            worldX[vertexIndex] = worldPosition.x;
+            worldY[vertexIndex] = worldPosition.y;
+            worldZ[vertexIndex] = worldPosition.z;
         }
 
         return {
@@ -547,6 +519,9 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
             screenX,
             screenY,
             depth,
+            worldX,
+            worldY,
+            worldZ,
         };
     }
 }

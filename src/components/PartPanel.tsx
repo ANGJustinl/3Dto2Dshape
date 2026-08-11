@@ -265,13 +265,167 @@ function PartPanel({
             }
           />
         </label>
+        <label className="projection-color-control">
+          <span>Background</span>
+          <input
+            type="color"
+            value={projectionSettings.backgroundColor}
+            onChange={(event) =>
+              onProjectionSettingsChange({
+                ...projectionSettings,
+                backgroundColor: event.currentTarget.value,
+              })
+            }
+          />
+        </label>
+        <label className="projection-color-control">
+          <span>Outline</span>
+          <input
+            type="color"
+            value={projectionSettings.outlineColor}
+            onChange={(event) =>
+              onProjectionSettingsChange({
+                ...projectionSettings,
+                outlineColor: event.currentTarget.value,
+              })
+            }
+          />
+        </label>
+        <label className="projection-slider">
+          <span>Outline Opacity {projectionSettings.outlineOpacity.toFixed(2)}</span>
+          <input
+            type="range"
+            min="0"
+            max="1"
+            step="0.05"
+            value={projectionSettings.outlineOpacity}
+            onChange={(event) =>
+              onProjectionSettingsChange({
+                ...projectionSettings,
+                outlineOpacity: Number(event.currentTarget.value),
+              })
+            }
+          />
+        </label>
+        <label className="projection-slider">
+          <span>Stroke {projectionSettings.strokeWidth.toFixed(1)}</span>
+          <input
+            type="range"
+            min="0"
+            max="8"
+            step="0.25"
+            value={projectionSettings.strokeWidth}
+            onChange={(event) =>
+              onProjectionSettingsChange({
+                ...projectionSettings,
+                strokeWidth: Number(event.currentTarget.value),
+              })
+            }
+          />
+        </label>
+        <label className="projection-slider">
+          <span>Shadow {projectionSettings.shadowStrength.toFixed(2)}</span>
+          <input
+            type="range"
+            min="0"
+            max="1"
+            step="0.05"
+            value={projectionSettings.shadowStrength}
+            onChange={(event) =>
+              onProjectionSettingsChange({
+                ...projectionSettings,
+                shadowStrength: Number(event.currentTarget.value),
+              })
+            }
+          />
+        </label>
+        <label className="projection-slider">
+          <span>Highlight {projectionSettings.highlightStrength.toFixed(2)}</span>
+          <input
+            type="range"
+            min="0"
+            max="1"
+            step="0.05"
+            value={projectionSettings.highlightStrength}
+            onChange={(event) =>
+              onProjectionSettingsChange({
+                ...projectionSettings,
+                highlightStrength: Number(event.currentTarget.value),
+              })
+            }
+          />
+        </label>
+        <label className="projection-slider">
+          <span>Shadow Threshold {projectionSettings.shadowThreshold.toFixed(2)}</span>
+          <input
+            type="range"
+            min="-1"
+            max="0.8"
+            step="0.05"
+            value={projectionSettings.shadowThreshold}
+            onChange={(event) =>
+              onProjectionSettingsChange({
+                ...projectionSettings,
+                shadowThreshold: Number(event.currentTarget.value),
+              })
+            }
+          />
+        </label>
+        <label className="projection-slider">
+          <span>Highlight Threshold {projectionSettings.highlightThreshold.toFixed(2)}</span>
+          <input
+            type="range"
+            min="0.2"
+            max="1"
+            step="0.05"
+            value={projectionSettings.highlightThreshold}
+            onChange={(event) =>
+              onProjectionSettingsChange({
+                ...projectionSettings,
+                highlightThreshold: Number(event.currentTarget.value),
+              })
+            }
+          />
+        </label>
+        <label className="projection-slider">
+          <span>Edge Roughness {projectionSettings.edgeRoughness.toFixed(2)}</span>
+          <input
+            type="range"
+            min="0"
+            max="2"
+            step="0.05"
+            value={projectionSettings.edgeRoughness}
+            onChange={(event) =>
+              onProjectionSettingsChange({
+                ...projectionSettings,
+                edgeRoughness: Number(event.currentTarget.value),
+              })
+            }
+          />
+        </label>
+        <label className="projection-slider">
+          <span>Min Shape Area {projectionSettings.minShapeArea.toFixed(0)}</span>
+          <input
+            type="range"
+            min="1"
+            max="160"
+            step="1"
+            value={projectionSettings.minShapeArea}
+            onChange={(event) =>
+              onProjectionSettingsChange({
+                ...projectionSettings,
+                minShapeArea: Number(event.currentTarget.value),
+              })
+            }
+          />
+        </label>
         <label className="projection-slider">
           <span>Min Triangles {projectionSettings.minTriangleCount}</span>
           <input
             type="range"
-            min="4"
-            max="240"
-            step="4"
+            min="1"
+            max="32"
+            step="1"
             value={projectionSettings.minTriangleCount}
             onChange={(event) =>
               onProjectionSettingsChange({

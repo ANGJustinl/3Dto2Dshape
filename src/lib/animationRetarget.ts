@@ -115,13 +115,16 @@ export const loadRetargetedMixamoClip = async (
 ) => {
     const loader = new FBXLoader();
     const sourceRoot = await loader.loadAsync(url);
-    const sourceMesh = findFirstSkinnedMesh(sourceRoot);
-    const sourceBones = sourceMesh?.skeleton.bones ?? findBonesInHierarchy(sourceRoot);
+    const sourceMesh = findFirstSkinnedMesh(sourceRoot) as THREE.SkinnedMesh | null;
+    const sourceBones: THREE.Bone[] = sourceMesh
+        ? sourceMesh.skeleton.bones
+        : findBonesInHierarchy(sourceRoot);
     if (sourceBones.length === 0) {
         throw new Error('Mixamo FBX does not contain a skeleton.');
     }
 
-    const sourceClip = sourceRoot.animations[0] ?? sourceMesh?.animations[0];
+    const sourceAnimations = (sourceRoot as THREE.Object3D & { animations?: THREE.AnimationClip[] }).animations ?? [];
+    const sourceClip = sourceAnimations[0];
     if (!sourceClip) {
         throw new Error('Mixamo FBX does not contain an animation clip.');
     }
@@ -135,7 +138,6 @@ export const loadRetargetedMixamoClip = async (
         names,
         hip,
         useFirstFramePosition: true,
-        preserveBonePositions: true,
         preserveBoneMatrix: true,
     });
 

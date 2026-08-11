@@ -79,13 +79,23 @@ export class OverlayRenderPipeline {
                     job.viewportHeight <= 0 ||
                     !job.settings.enabled
                 ) {
-                    await clear2DRenderComposition(canvas, job.viewportWidth, job.viewportHeight);
+                    await clear2DRenderComposition(
+                        canvas,
+                        job.viewportWidth,
+                        job.viewportHeight,
+                        job.settings,
+                    );
                     continue;
                 }
 
                 const meshProjectionStage = getWebGpuScreenProjector();
                 if (!meshProjectionStage.isSupported()) {
-                    await clear2DRenderComposition(canvas, job.viewportWidth, job.viewportHeight);
+                    await clear2DRenderComposition(
+                        canvas,
+                        job.viewportWidth,
+                        job.viewportHeight,
+                        job.settings,
+                    );
                     continue;
                 }
 
@@ -117,7 +127,10 @@ export class OverlayRenderPipeline {
                 }
 
                 const filterStart = performance.now();
-                const filteredShapes = filterSmallProjectedPartShapes(projectionResult.shapes);
+                const filteredShapes = filterSmallProjectedPartShapes(
+                    projectionResult.shapes,
+                    job.settings.minShapeArea,
+                );
                 const filterMs = performance.now() - filterStart;
 
                 const composeStart = performance.now();

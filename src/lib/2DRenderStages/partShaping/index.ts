@@ -1,3 +1,4 @@
+import * as THREE from 'three';
 import type { GpuDepthAtlasState } from '../partRasterization/rasterizer';
 import type { ProjectionPartSource } from '../../modelParts';
 import { recordPerfSample } from '../../perfLogger';
@@ -7,13 +8,145 @@ import type {
     ProjectionMaskState,
     ProjectionOverlaySettings,
 } from '../../2DRenderShared/types';
-import { getGpuPartRasterizer } from '../partRasterization/rasterizer';
+import { getGpuPartRasterizer, type GpuRasterizedPartData } from '../partRasterization/rasterizer';
 import { buildProjectedPartShapeFromRasterData } from './partAssembler';
+import { getPaintLayerForShade, shadeColorForLayer } from '../../2DRenderShared/paintStyle';
 
 const projectPointDepth = (
     projectionCache: MeshProjectionCache,
     vertexIndex: number,
 ): number => projectionCache.depth[vertexIndex];
+
+const getTriangleShade = (
+    projectionCache: MeshProjectionCache,
+    vertexIndices: [number, number, number],
+    lightDirection: THREE.Vector3,
+) => {
+    const left = new THREE.Vector3(
+        projectionCache.worldX[vertexIndices[0]],
+        projectionCache.worldY[vertexIndices[0]],
+        projectionCache.worldZ[vertexIndices[0]],
+    );
+    const middle = new THREE.Vector3(
+        projectionCache.worldX[vertexIndices[1]],
+        projectionCache.worldY[vertexIndices[1]],
+        projectionCache.worldZ[vertexIndices[1]],
+    );
+    const right = new THREE.Vector3(
+        projectionCache.worldX[vertexIndices[2]],
+        projectionCache.worldY[vertexIndices[2]],
+        projectionCache.worldZ[vertexIndices[2]],
+    );
+
+    const normal = middle.sub(left).cross(right.sub(left)).normalize();
+    return normal.dot(lightDirection);
+};
+
+const buildPaintLayerParts = (
+    part: ProjectionPartSource,
+    projectionCache: MeshProjectionCache,
+    settings: ProjectionOverlaySettings,
+) => {
+    const lightDirection = new THREE.Vector3(...settings.lightDirection).normalize();
+    const trianglesByLayer = new Map<ReturnType<typeof getPaintLayerForShade>, ProjectionPartSource['triangles']>();
+
+    part.triangles.forEach((triangle) => {
+        const shade = getTriangleShade(projectionCache, triangle.vertexIndices, lightDirection);
+        const layer = getPaintLayerForShade(shade, settings);
+        const layerTriangles = trianglesByLayer.get(layer) ?? [];
+        layerTriangles.push(triangle);
+        trianglesByLayer.set(layer, layerTriangles);
+    });
+
+    const layers: ProjectionPartSource[] = [];
+    (['shadow', 'base', 'highlight'] as const).forEach((paintLayer) => {
+        const triangles = trianglesByLayer.get(paintLayer) ?? [];
+        if (triangles.length === 0) {
+            return;
+        }
+
+        layers.push({
+            ...part,
+            leafId: `${part.leafId}::${paintLayer}`,
+            sourceLeafId: part.leafId,
+            paintLayer,
+            triangleCount: triangles.length,
+            color: shadeColorForLayer(part.color, paintLayer, settings),
+            triangles,
+        });
+    });
+    return layers;
+};
+
+const applyGlobalDepthVisibility = (
+    rasterResults: Array<GpuRasterizedPartData | null>,
+    viewportWidth: number,
+    viewportHeight: number,
+) => {
+    const globalDepth = new Float32Array(viewportWidth * viewportHeight);
+    globalDepth.fill(Number.POSITIVE_INFINITY);
+
+    rasterResults.forEach((rasterData) => {
+        if (!rasterData) {
+            return;
+        }
+
+        for (let localY = 0; localY < rasterData.height; localY += 1) {
+            for (let localX = 0; localX < rasterData.width; localX += 1) {
+                const localIndex = localY * rasterData.width + localX;
+                if (rasterData.occupied[localIndex] === 0) {
+                    continue;
+                }
+
+                const screenX = rasterData.offsetX + localX;
+                const screenY = rasterData.offsetY + localY;
+                if (
+                    screenX < 0 ||
+                    screenY < 0 ||
+                    screenX >= viewportWidth ||
+                    screenY >= viewportHeight
+                ) {
+                    continue;
+                }
+
+                const screenIndex = screenY * viewportWidth + screenX;
+                globalDepth[screenIndex] = Math.min(globalDepth[screenIndex], rasterData.depth[localIndex]);
+            }
+        }
+    });
+
+    rasterResults.forEach((rasterData) => {
+        if (!rasterData) {
+            return;
+        }
+
+        for (let localY = 0; localY < rasterData.height; localY += 1) {
+            for (let localX = 0; localX < rasterData.width; localX += 1) {
+                const localIndex = localY * rasterData.width + localX;
+                if (rasterData.occupied[localIndex] === 0) {
+                    continue;
+                }
+
+                const screenX = rasterData.offsetX + localX;
+                const screenY = rasterData.offsetY + localY;
+                if (
+                    screenX < 0 ||
+                    screenY < 0 ||
+                    screenX >= viewportWidth ||
+                    screenY >= viewportHeight
+                ) {
+                    rasterData.occupied[localIndex] = 0;
+                    continue;
+                }
+
+                const globalDepthValue = globalDepth[screenY * viewportWidth + screenX];
+                if (rasterData.depth[localIndex] > globalDepthValue + 0.0005) {
+                    rasterData.occupied[localIndex] = 0;
+                }
+            }
+        }
+    });
+};
 
 export const shapeProjectedParts = async (
     parts: ProjectionPartSource[],
@@ -29,7 +162,7 @@ export const shapeProjectedParts = async (
     const totalStart = performance.now();
     const filteredParts = parts.filter(
         (part) =>
-            part.triangleCount >= settings.minTriangleCount &&
+            part.triangleCount >= Math.max(1, settings.minTriangleCount) &&
             (visibleLeafIds ? visibleLeafIds.has(part.leafId) : true),
     );
     if (filteredParts.length === 0) {
@@ -42,40 +175,34 @@ export const shapeProjectedParts = async (
     const rasterizer = getGpuPartRasterizer();
     const prepareStart = performance.now();
     const preparedParts = filteredParts
-        .map((part) => {
+        .flatMap((part) => {
             const projectionCache = frame.getProjectionCache(part.mesh);
             if (!projectionCache) {
-                return null;
+                return [];
             }
 
-            const fallbackDepth =
-                part.triangles[0]?.vertexIndices !== undefined
-                    ? (projectPointDepth(projectionCache, part.triangles[0].vertexIndices[0]) +
-                          projectPointDepth(projectionCache, part.triangles[0].vertexIndices[1]) +
-                          projectPointDepth(projectionCache, part.triangles[0].vertexIndices[2])) /
-                      3
-                    : Number.POSITIVE_INFINITY;
+            return buildPaintLayerParts(part, projectionCache, settings).map((paintPart) => {
+                const fallbackDepth =
+                    paintPart.triangles[0]?.vertexIndices !== undefined
+                        ? (projectPointDepth(projectionCache, paintPart.triangles[0].vertexIndices[0]) +
+                              projectPointDepth(projectionCache, paintPart.triangles[0].vertexIndices[1]) +
+                              projectPointDepth(projectionCache, paintPart.triangles[0].vertexIndices[2])) /
+                          3
+                        : Number.POSITIVE_INFINITY;
 
-            return {
-                part,
-                projectionCache,
-                fallbackDepth,
-            };
-        })
-        .filter(
-            (
-                preparedPart,
-            ): preparedPart is {
-                part: ProjectionPartSource;
-                projectionCache: MeshProjectionCache;
-                fallbackDepth: number;
-            } => preparedPart !== null,
-        );
+                return {
+                    part: paintPart,
+                    projectionCache,
+                    fallbackDepth,
+                };
+            });
+        });
     const prepareMs = performance.now() - prepareStart;
 
     const rasterStart = performance.now();
     const rasterResults = await rasterizer.rasterizeBatch(preparedParts);
     const rasterMs = performance.now() - rasterStart;
+    applyGlobalDepthVisibility(rasterResults, frame.width, frame.height);
     const depthAtlas = rasterizer.getDepthAtlasState();
 
     let buildSharedChainsMs = 0;

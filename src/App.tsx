@@ -21,13 +21,34 @@ import {
 } from './lib/2DRenderShared/types';
 import { createProjectionMaskState } from './lib/2DRenderShared/maskState';
 import { getWebGpuScreenProjector } from './lib/2DRenderStages/meshProjection/projector';
+import { getSharedWebGpuContext } from './lib/webgpuShared';
 
 type MaterialState = {
     visible: boolean;
 };
 
+type GpuStatus = 'checking' | 'ready' | 'webgpu-unavailable' | 'webgpu-error';
+type AssetStatus = 'loading-model' | 'loading-textures' | 'ready' | 'model-error';
+type RuntimeStatus = GpuStatus | AssetStatus;
+
+const RUNTIME_STATUS_LABELS: Record<RuntimeStatus, string> = {
+    checking: 'Checking WebGPU…',
+    'webgpu-unavailable': 'WebGPU is unavailable. Use a compatible browser for the 2D view.',
+    'webgpu-error': 'WebGPU initialization failed. Check browser permissions or GPU support.',
+    'loading-model': 'Loading PMX model…',
+    'loading-textures': 'Waiting for model textures…',
+    ready: 'Ready',
+    'model-error': 'Model failed to load. Check the external models directory.',
+};
+
 const INITIAL_POSE_ANIMATION_VALUE = '__initial_pose__';
 const ANIMATION_FRAME_SECONDS = 1 / 30;
+
+// Runtime assets are served from public/models. Keep the downloaded folder name
+// encoded so the Chinese model directory remains a valid URL segment.
+const MODEL_DIRECTORY = '可琳_by_绝区零_2bdf4e664d2349e13c899f884728ce53';
+const MODEL_FILE = '可琳.pmx';
+const MODEL_URL = `${import.meta.env.BASE_URL}models/${encodeURIComponent(MODEL_DIRECTORY)}/${encodeURIComponent(MODEL_FILE)}`;
 
 const VMD_ANIMATION_OPTIONS = [
     {
@@ -37,10 +58,6 @@ const VMD_ANIMATION_OPTIONS = [
     {
         label: 'Aerial',
         value: 'Aerial.vmd',
-    },
-    {
-        label: '我最可爱的地方_30s免费版',
-        value: '我最可爱的地方_30s免费版.vmd',
     },
 ] as const;
 
@@ -284,7 +301,17 @@ function App() {
         strokeWidth: 1.25,
         showContours: true,
         opacity: 1,
-        minTriangleCount: 40,
+        minTriangleCount: 1,
+        backgroundColor: '#FFFDF8',
+        outlineColor: '#51443D',
+        outlineOpacity: 0.72,
+        shadowStrength: 0.38,
+        highlightStrength: 0.24,
+        shadowThreshold: 0.08,
+        highlightThreshold: 0.62,
+        lightDirection: [0.35, 0.8, 0.45],
+        minShapeArea: 12,
+        edgeRoughness: 0.35,
     });
     const visibleLeafIdsRef = useRef<Set<string> | null>(null);
     const selectedAnimationRef = useRef<string>(VMD_ANIMATION_OPTIONS[0].value);
@@ -309,6 +336,25 @@ function App() {
     );
     const [frameStride, setFrameStride] = useState(2);
     const [isPlaybackPaused, setIsPlaybackPaused] = useState(false);
+    const [gpuStatus, setGpuStatus] = useState<GpuStatus>('checking');
+    const [assetStatus, setAssetStatus] = useState<AssetStatus>('loading-model');
+
+    useEffect(() => {
+        const context = getSharedWebGpuContext();
+        if (!context.isSupported()) {
+            setGpuStatus('webgpu-unavailable');
+            return;
+        }
+
+        void context
+            .getDevice()
+            .then((device) => {
+                setGpuStatus(device ? 'ready' : 'webgpu-error');
+            })
+            .catch(() => {
+                setGpuStatus('webgpu-error');
+            });
+    }, []);
 
     useEffect(() => {
         projectionSettingsRef.current = projectionSettings;
@@ -510,7 +556,7 @@ function App() {
             loader.loadAnimation(
                 `${import.meta.env.BASE_URL}models/vmd/${encodeURIComponent(selectedAnimationRef.current)}`,
                 targetMesh,
-                (animation) => {
+                (animation: THREE.AnimationClip) => {
                     if (disposed || currentToken !== animationLoadToken) {
                         return;
                     }
@@ -595,10 +641,12 @@ function App() {
             setParts(segmentation.parts);
             setDebugMaterials(segmentation.debugMaterials);
             segmentationReady = true;
+            setAssetStatus('ready');
             void tryAttachMmdAnimation();
         };
 
         const scheduleSegmentation = (targetModel: THREE.Object3D) => {
+            setAssetStatus('loading-textures');
             const attempt = () => {
                 if (disposed) {
                     return;
@@ -616,13 +664,14 @@ function App() {
         };
 
         loader.load(
-            `${import.meta.env.BASE_URL}models/Corin/Corin.pmx`,
+            MODEL_URL,
             (loadedModel: THREE.Object3D) => {
                 if (disposed) {
                     return;
                 }
 
                 model = loadedModel;
+                setAssetStatus('loading-textures');
                 modelRef.current = loadedModel;
                 const currentModel = loadedModel;
                 const box = new THREE.Box3().setFromObject(currentModel);
@@ -648,6 +697,7 @@ function App() {
             },
             undefined,
             (error: unknown) => {
+                setAssetStatus('model-error');
                 console.error('Failed to load PMX model.', error);
             },
         );
@@ -684,7 +734,11 @@ function App() {
             }
             scene.remove(debugLineOverlay);
             debugLineOverlay.geometry.dispose();
-            debugLineOverlay.material.dispose();
+            if (Array.isArray(debugLineOverlay.material)) {
+                debugLineOverlay.material.forEach((material) => material.dispose());
+            } else {
+                debugLineOverlay.material.dispose();
+            }
             debugLineOverlay = null;
         };
 
@@ -896,6 +950,13 @@ function App() {
                 window.clearTimeout(segmentationTimer);
             }
             clearDebugOverlay();
+            if (targetMeshForAnimation) {
+                try {
+                    mmdHelper.remove(targetMeshForAnimation);
+                } catch {
+                    // ignore helper cleanup errors on dispose
+                }
+            }
             modelRef.current = null;
             leafMaterialMapRef.current.clear();
             projectionPartsRef.current = [];
@@ -905,17 +966,12 @@ function App() {
             renderer.domElement.removeEventListener('pointerup', onPointerUp);
             renderer.domElement.removeEventListener('contextmenu', onContextMenu);
             controls.dispose();
-            if (modelRef.current instanceof THREE.SkinnedMesh) {
-                try {
-                    mmdHelper.remove(modelRef.current);
-                } catch {
-                    // ignore helper cleanup errors on dispose
-                }
-            }
             renderer.dispose();
             mount.removeChild(renderer.domElement);
         };
     }, []);
+
+    const runtimeStatus: RuntimeStatus = gpuStatus === 'ready' ? assetStatus : gpuStatus;
 
     return (
         <div className="app-shell">
@@ -943,6 +999,11 @@ function App() {
             </div>
             <div ref={resultPaneRef} className="result-pane">
                 <ProjectionOverlay ref={projectionOverlayRef} />
+                {runtimeStatus !== 'ready' ? (
+                    <div className="runtime-status" role="status">
+                        {RUNTIME_STATUS_LABELS[runtimeStatus]}
+                    </div>
+                ) : null}
             </div>
         </div>
     );

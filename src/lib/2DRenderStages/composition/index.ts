@@ -6,8 +6,9 @@ export const clear2DRenderComposition = async (
     canvas: HTMLCanvasElement,
     viewportWidth: number,
     viewportHeight: number,
+    settings?: ProjectionOverlaySettings,
 ) => {
-    await getGpuOverlayComposer().clear(canvas, viewportWidth, viewportHeight);
+    await getGpuOverlayComposer().clear(canvas, viewportWidth, viewportHeight, settings);
 };
 
 export const compose2DRenderOverlay = async (
