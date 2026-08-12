@@ -33,6 +33,9 @@ type PreparedShape = {
         atlasHeight: number;
     };
     orientedBounds: ProjectedPartShape['orientedBounds'];
+    depthSource: ProjectedPartShape['depthSource'];
+    depth: number;
+    edgeProfile: ProjectedPartShape['edgeProfile'];
     loopRanges: Uint32Array;
     loopPoints: Float32Array;
 };
@@ -143,6 +146,9 @@ const buildPreparedShape = (
         rasterBounds: shape.rasterBounds,
         atlasRegion: shape.atlasRegion,
         orientedBounds: shape.orientedBounds,
+        depthSource: shape.depthSource ?? 'atlas',
+        depth: shape.depth,
+        edgeProfile: shape.edgeProfile,
         loopRanges: flattenedLoops.loopRanges,
         loopPoints: flattenedLoops.loopPoints,
     };
@@ -380,6 +386,8 @@ struct Uniforms {
     obbAxisXy: vec4<f32>,
     color: vec4<f32>,
     edgeColor: vec4<f32>,
+    depthSettings: vec4<f32>,
+    edgeSettings: vec4<f32>,
 }
 
 struct VertexInput {
@@ -473,7 +481,16 @@ fn isBoundary(screenPosition: vec2<f32>) -> bool {
     return minimumDistance <= strokeRadius;
 }
 
+fn stableEdgeNoise(screenPosition: vec2<f32>) -> f32 {
+    let seed = uniforms.edgeSettings.w;
+    let value = sin(dot(screenPosition + vec2<f32>(seed, seed * 0.37), vec2<f32>(12.9898, 78.233))) * 43758.5453;
+    return value - floor(value);
+}
+
 fn sampleDepthNdc(screenPosition: vec2<f32>) -> f32 {
+    if (uniforms.depthSettings.x > 0.5) {
+        return uniforms.depthSettings.y;
+    }
     let rawLocalX = screenPosition.x - uniforms.rasterBounds.x;
     let rawLocalY = screenPosition.y - uniforms.rasterBounds.y;
     var sampleScreen = screenPosition;
@@ -575,11 +592,16 @@ fn fragmentMain(input: VertexOutput) -> FragmentOutput {
 
     let depthNdc = sampleDepthNdc(input.screenPosition);
     var output: FragmentOutput;
-    output.color = select(
-        uniforms.color,
-        uniforms.edgeColor,
-        uniforms.viewportStroke.w > 0.5 && isBoundary(input.screenPosition),
-    );
+    let onBoundary = uniforms.viewportStroke.w > 0.5 && isBoundary(input.screenPosition);
+    if (onBoundary && uniforms.edgeSettings.x > 1.5 && stableEdgeNoise(input.screenPosition) < uniforms.edgeSettings.z) {
+        discard;
+    }
+    var edgeColor = uniforms.edgeColor;
+    edgeColor.a *= uniforms.edgeSettings.y;
+    output.color = select(uniforms.color, edgeColor, onBoundary);
+    if (uniforms.edgeSettings.x > 0.5 && uniforms.edgeSettings.x < 1.5) {
+        output.color.a *= 0.92;
+    }
     output.depth = clamp(depthNdc * 0.5 + 0.5, 0.0, 1.0);
     return output;
 }
@@ -709,6 +731,7 @@ fn fragmentMain(input: VertexOutput) -> FragmentOutput {
             shape.bounds.offsetX + shape.bounds.width, shape.bounds.offsetY + shape.bounds.height,
         ]);
         const vertexBuffer = this.createBuffer(device, vertices, GPUBufferUsageVertex | GPUBufferUsageCopyDst);
+        const edgeModeCode = shape.edgeProfile.mode === 'open' ? 2 : shape.edgeProfile.mode === 'soft' ? 1 : 0;
 
         const fillUniformBuffer = this.createBuffer(
             device,
@@ -739,6 +762,14 @@ fn fragmentMain(input: VertexOutput) -> FragmentOutput {
                 shape.orientedBounds.axisY.y,
                  ...shape.color,
                  ...hexToRgba(settings.outlineColor, settings.outlineOpacity),
+                shape.depthSource === 'constant' ? 1 : 0,
+                shape.depth,
+                0,
+                0,
+                edgeModeCode,
+                shape.edgeProfile.hardness,
+                shape.edgeProfile.openness,
+                shape.edgeProfile.seed % 10000,
             ]),
             GPUBufferUsageUniform | GPUBufferUsageCopyDst,
         );

@@ -8,9 +8,10 @@ import type { ProjectedPartShape, ProjectionOverlaySettings } from './types';
 
 const settings: ProjectionOverlaySettings = {
     enabled: true,
+    styleMode: 'animationStable',
     simplifyEpsilon: 4,
     strokeWidth: 1.25,
-    showContours: true,
+    showContours: false,
     opacity: 1,
     minTriangleCount: 1,
     backgroundColor: '#FFFDF8',
@@ -23,14 +24,36 @@ const settings: ProjectionOverlaySettings = {
     lightDirection: [0.35, 0.8, 0.45],
     minShapeArea: 12,
     edgeRoughness: 0.35,
+    edgeSmoothing: 'soft',
+    compositionMode: 'vector',
+    boundaryGuard: 'outerDepthNormal',
+    depthMergeThreshold: 0.035,
+    normalMergeThreshold: 0.61,
+    gapMergeThreshold: 1.5,
+    temporalStability: 0.78,
+    globalShapeBudget: 64,
+    focusShapeBudgets: { focal: 24, support: 16, abstract: 8 },
+    mergeColorThreshold: 0.12,
+    partOverrides: {},
 };
 
 const makeShape = (loop: Array<{ x: number; y: number }>): ProjectedPartShape => ({
     leafId: 'part::base',
     sourceLeafId: 'part',
     paintLayer: 'base',
+    stableId: 'part::base::1:1',
+    focusLevel: 'support',
+    macroGroup: 'torso',
+    edgeProfile: { mode: 'soft', hardness: 0.62, openness: 0, seed: 1 },
+    sourceColors: ['#AABBCC'],
+    accentScore: 0,
+    connectivityRole: 'normal',
     color: '#AABBCC',
     depth: 0,
+    area: 32,
+    centroid: { x: 5, y: 5 },
+    depthRange: [0, 0],
+    normal: [0, 0, 1],
     loops: [loop],
     rasterBounds: { width: 20, height: 20, offsetX: 0, offsetY: 0 },
     atlasRegion: { atlasX: 0, atlasY: 0, atlasWidth: 20, atlasHeight: 20 },
@@ -73,5 +96,25 @@ describe('projected shape filtering', () => {
         const result = filterSmallProjectedPartShapes([small, large], 12);
         expect(result).toHaveLength(1);
         expect(result[0].loops).toHaveLength(1);
+    });
+
+    it('keeps a tiny connectivity bridge and high-value accent', () => {
+        const bridge = {
+            ...makeShape([
+                { x: 0, y: 0 },
+                { x: 1, y: 0 },
+                { x: 0, y: 1 },
+            ]),
+            connectivityRole: 'bridge' as const,
+        };
+        const eye = {
+            ...makeShape([
+                { x: 0, y: 0 },
+                { x: 1, y: 0 },
+                { x: 0, y: 1 },
+            ]),
+            accentScore: 1,
+        };
+        expect(filterSmallProjectedPartShapes([bridge, eye], 12)).toHaveLength(2);
     });
 });

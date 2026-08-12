@@ -6,6 +6,9 @@ import { clear2DRenderComposition, compose2DRenderOverlay } from '../2DRenderSta
 import { getWebGpuScreenProjector } from '../2DRenderStages/meshProjection/projector';
 import { filterSmallProjectedPartShapes } from '../2DRenderStages/partFiltering';
 import { shapeProjectedParts } from '../2DRenderStages/partShaping';
+import { composeProjectedShapes } from '../2DRenderStages/partShaping/shapeComposition';
+import { ShapeTrackState } from './shapeTracking';
+import { getStyleModeDefaults } from '../2DRenderShared/focusResolver';
 
 type RenderJob = {
     root: THREE.Object3D | null;
@@ -23,6 +26,7 @@ export class OverlayRenderPipeline {
     private queuedJob: RenderJob | null = null;
     private processing = false;
     private droppedQueuedFrames = 0;
+    private readonly shapeTrackState = new ShapeTrackState();
 
     async enqueue(
         canvas: HTMLCanvasElement | null,
@@ -126,10 +130,37 @@ export class OverlayRenderPipeline {
                     continue;
                 }
 
-                const filterStart = performance.now();
-                const filteredShapes = filterSmallProjectedPartShapes(
+                const compositionStart = performance.now();
+                const composedShapes = composeProjectedShapes(
                     projectionResult.shapes,
-                    job.settings.minShapeArea,
+                    job.maskState.sharedChains,
+                    job.settings,
+                    job.viewportWidth,
+                    job.viewportHeight,
+                );
+                const compositionMs = performance.now() - compositionStart;
+
+                const stableStart = performance.now();
+                const stabilizedShapes = this.shapeTrackState.stabilize(
+                    composedShapes,
+                    job.settings,
+                    job.frameId,
+                    job.viewportWidth,
+                    job.viewportHeight,
+                );
+                const stabilizeMs = performance.now() - stableStart;
+
+                const filterStart = performance.now();
+                const modeDefaults = getStyleModeDefaults(job.settings.styleMode);
+                const filteredShapes = filterSmallProjectedPartShapes(
+                    stabilizedShapes,
+                    job.settings.minShapeArea * modeDefaults.minShapeAreaScale,
+                    // The focal area is the recognition anchor.  Keep its
+                    // loops through the final pass; the earlier assembler is
+                    // already responsible for removing degenerate triangles.
+                    // Filtering it here was the last way for eyes/mouth/face
+                    // islands to vanish after visibility had been resolved.
+                    { focal: 0.05, support: 1, abstract: 1.65 },
                 );
                 const filterMs = performance.now() - filterStart;
 
@@ -152,6 +183,8 @@ export class OverlayRenderPipeline {
                         waitForFrame: waitMs,
                         getFrame: frameLookupMs,
                         shapeParts: shapingMs,
+                        composeShapes: compositionMs,
+                        stabilizeShapes: stabilizeMs,
                         filterShapes: filterMs,
                         compose: composeMs,
                         droppedQueuedFrames: this.droppedQueuedFrames,

@@ -297,9 +297,10 @@ function App() {
     const projectionMaskStateRef = useRef<ProjectionMaskState | null>(null);
     const projectionSettingsRef = useRef<ProjectionOverlaySettings>({
         enabled: true,
+        styleMode: 'animationStable',
         simplifyEpsilon: 4,
         strokeWidth: 1.25,
-        showContours: true,
+        showContours: false,
         opacity: 1,
         minTriangleCount: 1,
         backgroundColor: '#FFFDF8',
@@ -310,8 +311,23 @@ function App() {
         shadowThreshold: 0.08,
         highlightThreshold: 0.62,
         lightDirection: [0.35, 0.8, 0.45],
-        minShapeArea: 12,
+        minShapeArea: 8,
         edgeRoughness: 0.35,
+        edgeSmoothing: 'soft',
+        compositionMode: 'vector',
+        boundaryGuard: 'outerDepthNormal',
+        depthMergeThreshold: 0.035,
+        normalMergeThreshold: 0.61,
+        gapMergeThreshold: 1.5,
+        temporalStability: 0.78,
+        globalShapeBudget: 96,
+        focusShapeBudgets: {
+            focal: 40,
+            support: 28,
+            abstract: 12,
+        },
+        mergeColorThreshold: 0.12,
+        partOverrides: {},
     });
     const visibleLeafIdsRef = useRef<Set<string> | null>(null);
     const selectedAnimationRef = useRef<string>(VMD_ANIMATION_OPTIONS[0].value);

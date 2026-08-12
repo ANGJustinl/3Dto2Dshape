@@ -10,6 +10,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "polygon-clipping": "^0.15.7",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "three": "0.171.0"

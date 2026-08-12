@@ -112,6 +112,13 @@ canvas {
     width: 100%;
 }
 
+.projection-select {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    font-size: 12px;
+}
+
 .projection-color-control {
     display: flex;
     align-items: center;
@@ -203,6 +210,17 @@ canvas {
     background: #181512;
     color: #f8f4ed;
     border-color: #181512;
+}
+
+.part-focus-chip {
+    flex: 0 0 72px;
+    padding: 6px 8px;
+    border: 1px solid rgba(24, 21, 18, 0.12);
+    background: rgba(255, 255, 255, 0.72);
+    color: inherit;
+    cursor: pointer;
+    font-size: 10px;
+    text-transform: uppercase;
 }
 
 .debug-panel {
