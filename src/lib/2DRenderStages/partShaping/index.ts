@@ -11,6 +11,7 @@ import type {
 import { getGpuPartRasterizer, type GpuRasterizedPartData } from '../partRasterization/rasterizer';
 import { buildProjectedPartShapeFromRasterData } from './partAssembler';
 import { getPaintLayerForShade, shadeColorForLayer } from '../../2DRenderShared/paintStyle';
+import { resolvePartStyle, type ResolvedPartStyle } from '../../2DRenderShared/focusResolver';
 
 const projectPointDepth = (
     projectionCache: MeshProjectionCache,
@@ -46,6 +47,7 @@ const buildPaintLayerParts = (
     part: ProjectionPartSource,
     projectionCache: MeshProjectionCache,
     settings: ProjectionOverlaySettings,
+    resolvedStyle: ResolvedPartStyle,
 ) => {
     const lightDirection = new THREE.Vector3(...settings.lightDirection).normalize();
     const trianglesByLayer = new Map<ReturnType<typeof getPaintLayerForShade>, ProjectionPartSource['triangles']>();
@@ -70,6 +72,12 @@ const buildPaintLayerParts = (
             leafId: `${part.leafId}::${paintLayer}`,
             sourceLeafId: part.leafId,
             paintLayer,
+            focusLevel: resolvedStyle.focusLevel,
+            macroGroup: resolvedStyle.macroGroup,
+            shapeBudget: resolvedStyle.shapeBudget,
+            simplifyMultiplier: resolvedStyle.simplifyMultiplier,
+            accentScore: resolvedStyle.accentScore,
+            connectivityRole: resolvedStyle.connectivityRole,
             triangleCount: triangles.length,
             color: shadeColorForLayer(part.color, paintLayer, settings),
             triangles,
@@ -181,7 +189,9 @@ export const shapeProjectedParts = async (
                 return [];
             }
 
-            return buildPaintLayerParts(part, projectionCache, settings).map((paintPart) => {
+            const resolvedStyle = resolvePartStyle(part, projectionCache, settings);
+
+            return buildPaintLayerParts(part, projectionCache, settings, resolvedStyle).map((paintPart) => {
                 const fallbackDepth =
                     paintPart.triangles[0]?.vertexIndices !== undefined
                         ? (projectPointDepth(projectionCache, paintPart.triangles[0].vertexIndices[0]) +
@@ -231,7 +241,18 @@ export const shapeProjectedParts = async (
             return result.shape;
         })
         .filter((part): part is NonNullable<typeof part> => part !== null)
-        .sort((left, right) => right.depth - left.depth);
+        .sort((left, right) => {
+            const depthOrder = right.depth - left.depth;
+            if (Math.abs(depthOrder) > 0.0001) {
+                return depthOrder;
+            }
+            const focusRank = { abstract: 0, support: 1, focal: 2 } as const;
+            const focusOrder = focusRank[right.focusLevel] - focusRank[left.focusLevel];
+            if (focusOrder !== 0) {
+                return focusOrder;
+            }
+            return left.stableId.localeCompare(right.stableId);
+        });
     const buildTotalMs = performance.now() - buildStart;
 
     recordPerfSample({

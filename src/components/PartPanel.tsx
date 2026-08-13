@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { MaterialDebugInfo, PartNode } from '../lib/modelParts';
-import type { ProjectionOverlaySettings } from '../lib/2DRenderShared/types';
+import type { FocusLevel, ProjectionOverlaySettings } from '../lib/2DRenderShared/types';
 
 type PartPanelProps = {
   parts: PartNode[];
@@ -32,6 +32,8 @@ type VisiblePartRow = {
   childCount: number;
   swatchColor?: string;
 };
+
+const FOCUS_CYCLE: FocusLevel[] = ['auto', 'focal', 'support', 'abstract'];
 
 const ROW_HEIGHT = 40;
 const ROW_GAP = 4;
@@ -178,9 +180,48 @@ function PartPanel({
     });
   };
 
+  const cyclePartFocus = (partId: string) => {
+    const current = projectionSettings.partOverrides[partId]?.focusLevel ?? 'auto';
+    const next = FOCUS_CYCLE[(FOCUS_CYCLE.indexOf(current) + 1) % FOCUS_CYCLE.length];
+    const nextOverrides = { ...projectionSettings.partOverrides };
+    if (next === 'auto') {
+      const currentOverride = nextOverrides[partId];
+      if (currentOverride) {
+        const { focusLevel: _focusLevel, ...restOverride } = currentOverride;
+        if (Object.keys(restOverride).length === 0) {
+          delete nextOverrides[partId];
+        } else {
+          nextOverrides[partId] = restOverride;
+        }
+      }
+      onProjectionSettingsChange({ ...projectionSettings, partOverrides: nextOverrides });
+      return;
+    }
+    nextOverrides[partId] = {
+      ...nextOverrides[partId],
+      focusLevel: next,
+    };
+    onProjectionSettingsChange({ ...projectionSettings, partOverrides: nextOverrides });
+  };
+
   return (
     <aside className="part-panel">
       <div className="projection-controls">
+        <label className="projection-select">
+          <span>Style Mode</span>
+          <select
+            value={projectionSettings.styleMode}
+            onChange={(event) =>
+              onProjectionSettingsChange({
+                ...projectionSettings,
+                styleMode: event.currentTarget.value as ProjectionOverlaySettings['styleMode'],
+              })
+            }
+          >
+            <option value="animationStable">Animation Stable</option>
+            <option value="stillPainterly">Still Painterly</option>
+          </select>
+        </label>
         <label className="projection-select">
           <select
             value={selectedAnimation}
@@ -420,6 +461,201 @@ function PartPanel({
           />
         </label>
         <label className="projection-slider">
+          <span>Global Shape Budget {projectionSettings.globalShapeBudget}</span>
+          <input
+            type="range"
+            min="16"
+            max="128"
+            step="1"
+            value={projectionSettings.globalShapeBudget}
+            onChange={(event) =>
+              onProjectionSettingsChange({
+                ...projectionSettings,
+                globalShapeBudget: Number(event.currentTarget.value),
+              })
+            }
+          />
+        </label>
+        <label className="projection-slider">
+          <span>Merge Color {projectionSettings.mergeColorThreshold.toFixed(2)}</span>
+          <input
+            type="range"
+            min="0.02"
+            max="0.4"
+            step="0.01"
+            value={projectionSettings.mergeColorThreshold}
+            onChange={(event) =>
+              onProjectionSettingsChange({
+                ...projectionSettings,
+                mergeColorThreshold: Number(event.currentTarget.value),
+              })
+            }
+          />
+        </label>
+        <label className="projection-slider">
+          <span>Temporal Stability {projectionSettings.temporalStability.toFixed(2)}</span>
+          <input
+            type="range"
+            min="0"
+            max="1"
+            step="0.05"
+            value={projectionSettings.temporalStability}
+            onChange={(event) =>
+              onProjectionSettingsChange({
+                ...projectionSettings,
+                temporalStability: Number(event.currentTarget.value),
+              })
+            }
+          />
+        </label>
+        <label className="projection-select">
+          <span>Composition</span>
+          <select
+            value={projectionSettings.compositionMode}
+            onChange={(event) =>
+              onProjectionSettingsChange({
+                ...projectionSettings,
+                compositionMode: event.currentTarget.value as ProjectionOverlaySettings['compositionMode'],
+              })
+            }
+          >
+            <option value="vector">Vector</option>
+            <option value="raster">Raster</option>
+          </select>
+        </label>
+        <label className="projection-select">
+          <span>Boundary Guard</span>
+          <select
+            value={projectionSettings.boundaryGuard}
+            onChange={(event) =>
+              onProjectionSettingsChange({
+                ...projectionSettings,
+                boundaryGuard: event.currentTarget.value as ProjectionOverlaySettings['boundaryGuard'],
+              })
+            }
+          >
+            <option value="outer">Outer Contour</option>
+            <option value="outerDepthNormal">Outer + Depth/Normal</option>
+            <option value="depthNormal">Depth/Normal</option>
+            <option value="outerDepthNormalGap">Outer + Depth/Normal + Gap</option>
+          </select>
+        </label>
+        <label className="projection-select">
+          <span>Edge Smoothing</span>
+          <select
+            value={projectionSettings.edgeSmoothing}
+            onChange={(event) =>
+              onProjectionSettingsChange({
+                ...projectionSettings,
+                edgeSmoothing: event.currentTarget.value as ProjectionOverlaySettings['edgeSmoothing'],
+              })
+            }
+          >
+            <option value="hard">Hard</option>
+            <option value="soft">Soft</option>
+            <option value="open">Open</option>
+          </select>
+        </label>
+        <details className="projection-advanced">
+          <summary>Advanced / Experimental</summary>
+          <label className="projection-check">
+            <input
+              type="checkbox"
+              checked={projectionSettings.enableComposition}
+              onChange={(event) =>
+                onProjectionSettingsChange({
+                  ...projectionSettings,
+                  enableComposition: event.currentTarget.checked,
+                })
+              }
+            />
+            <span>Enable Composition</span>
+          </label>
+          <label className="projection-check">
+            <input
+              type="checkbox"
+              checked={projectionSettings.enableShapeTracking}
+              onChange={(event) =>
+                onProjectionSettingsChange({
+                  ...projectionSettings,
+                  enableShapeTracking: event.currentTarget.checked,
+                })
+              }
+            />
+            <span>Enable Shape Tracking</span>
+          </label>
+          <label className="projection-check">
+            <input
+              type="checkbox"
+              checked={projectionSettings.enableEdgeDistortion}
+              onChange={(event) =>
+                onProjectionSettingsChange({
+                  ...projectionSettings,
+                  enableEdgeDistortion: event.currentTarget.checked,
+                })
+              }
+            />
+            <span>Enable Edge Distortion</span>
+          </label>
+        </details>
+        <label className="projection-slider">
+          <span>Focal Budget {projectionSettings.focusShapeBudgets.focal}</span>
+          <input
+            type="range"
+            min="4"
+            max="48"
+            step="1"
+            value={projectionSettings.focusShapeBudgets.focal}
+            onChange={(event) =>
+              onProjectionSettingsChange({
+                ...projectionSettings,
+                focusShapeBudgets: {
+                  ...projectionSettings.focusShapeBudgets,
+                  focal: Number(event.currentTarget.value),
+                },
+              })
+            }
+          />
+        </label>
+        <label className="projection-slider">
+          <span>Support Budget {projectionSettings.focusShapeBudgets.support}</span>
+          <input
+            type="range"
+            min="4"
+            max="40"
+            step="1"
+            value={projectionSettings.focusShapeBudgets.support}
+            onChange={(event) =>
+              onProjectionSettingsChange({
+                ...projectionSettings,
+                focusShapeBudgets: {
+                  ...projectionSettings.focusShapeBudgets,
+                  support: Number(event.currentTarget.value),
+                },
+              })
+            }
+          />
+        </label>
+        <label className="projection-slider">
+          <span>Abstract Budget {projectionSettings.focusShapeBudgets.abstract}</span>
+          <input
+            type="range"
+            min="2"
+            max="24"
+            step="1"
+            value={projectionSettings.focusShapeBudgets.abstract}
+            onChange={(event) =>
+              onProjectionSettingsChange({
+                ...projectionSettings,
+                focusShapeBudgets: {
+                  ...projectionSettings.focusShapeBudgets,
+                  abstract: Number(event.currentTarget.value),
+                },
+              })
+            }
+          />
+        </label>
+        <label className="projection-slider">
           <span>Min Triangles {projectionSettings.minTriangleCount}</span>
           <input
             type="range"
@@ -485,6 +721,16 @@ function PartPanel({
                 </span>
                 <span>{row.triangleCount}</span>
               </button>
+              {!row.hasChildren ? (
+                <button
+                  type="button"
+                  className="part-focus-chip"
+                  onClick={() => cyclePartFocus(row.id)}
+                  title="Cycle focus override"
+                >
+                  {projectionSettings.partOverrides[row.id]?.focusLevel ?? 'auto'}
+                </button>
+              ) : null}
             </div>
           );
         })}

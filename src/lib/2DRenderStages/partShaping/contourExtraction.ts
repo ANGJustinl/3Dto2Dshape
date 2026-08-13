@@ -1,5 +1,14 @@
 import type { Point2D } from '../../2DRenderShared/types';
 
+/**
+ * Extract polygon loops from a binary mask using run-length boundary edges.
+ *
+ * The previous implementation emitted one edge for every occupied pixel
+ * side. A 700-part MMD frame can therefore create hundreds of thousands of
+ * short edges before simplification. We emit maximal horizontal/vertical
+ * runs instead, preserving the same cell-accurate boundary while reducing
+ * edge count and traversal work substantially.
+ */
 export const extractLoopsFromMask = (
     occupied: Uint8Array,
     width: number,
@@ -7,91 +16,136 @@ export const extractLoopsFromMask = (
     offsetX: number,
     offsetY: number,
 ) => {
-    const boundaryEdges = new Map<string, [Point2D, Point2D]>();
-    const indexOf = (x: number, y: number) => y * width + x;
+    if (width <= 0 || height <= 0 || occupied.length < width * height) {
+        return [];
+    }
 
+    const vertexStride = width + 1;
+    const vertexId = (x: number, y: number) => y * vertexStride + x;
+    const edgeStarts: number[] = [];
+    const edgeEnds: number[] = [];
+    const outgoing = new Map<number, number[]>();
+
+    const addEdge = (start: number, end: number) => {
+        const edgeId = edgeStarts.length;
+        edgeStarts.push(start);
+        edgeEnds.push(end);
+        const edges = outgoing.get(start);
+        if (edges) {
+            edges.push(edgeId);
+        } else {
+            outgoing.set(start, [edgeId]);
+        }
+    };
+
+    const isOccupied = (x: number, y: number) =>
+        x >= 0 && y >= 0 && x < width && y < height && occupied[y * width + x] !== 0;
+
+    // Horizontal boundary runs: top edges go left-to-right; bottom edges go
+    // right-to-left so all loops retain the original winding convention.
     for (let y = 0; y < height; y += 1) {
-        for (let x = 0; x < width; x += 1) {
-            if (occupied[indexOf(x, y)] === 0) {
+        let x = 0;
+        while (x < width) {
+            if (!isOccupied(x, y)) {
+                x += 1;
                 continue;
             }
 
-            const leftEmpty = x === 0 || occupied[indexOf(x - 1, y)] === 0;
-            const rightEmpty = x === width - 1 || occupied[indexOf(x + 1, y)] === 0;
-            const topEmpty = y === 0 || occupied[indexOf(x, y - 1)] === 0;
-            const bottomEmpty = y === height - 1 || occupied[indexOf(x, y + 1)] === 0;
+            const topBoundary = !isOccupied(x, y - 1);
+            const bottomBoundary = !isOccupied(x, y + 1);
+            const startX = x;
+            let endX = x + 1;
+            while (
+                endX < width &&
+                isOccupied(endX, y) &&
+                (!isOccupied(endX, y - 1) === topBoundary) &&
+                (!isOccupied(endX, y + 1) === bottomBoundary)
+            ) {
+                endX += 1;
+            }
 
-            if (topEmpty) {
-                boundaryEdges.set(`h:${x},${y}`, [
-                    { x: offsetX + x, y: offsetY + y },
-                    { x: offsetX + x + 1, y: offsetY + y },
-                ]);
+            if (topBoundary) {
+                addEdge(vertexId(startX, y), vertexId(endX, y));
             }
-            if (rightEmpty) {
-                boundaryEdges.set(`v:${x + 1},${y}`, [
-                    { x: offsetX + x + 1, y: offsetY + y },
-                    { x: offsetX + x + 1, y: offsetY + y + 1 },
-                ]);
+            if (bottomBoundary) {
+                addEdge(vertexId(endX, y + 1), vertexId(startX, y + 1));
             }
-            if (bottomEmpty) {
-                boundaryEdges.set(`h:${x},${y + 1}`, [
-                    { x: offsetX + x + 1, y: offsetY + y + 1 },
-                    { x: offsetX + x, y: offsetY + y + 1 },
-                ]);
-            }
-            if (leftEmpty) {
-                boundaryEdges.set(`v:${x},${y}`, [
-                    { x: offsetX + x, y: offsetY + y + 1 },
-                    { x: offsetX + x, y: offsetY + y },
-                ]);
-            }
+            x = endX;
         }
     }
 
-    const adjacency = new Map<string, Point2D[]>();
-    const pointKey = (point: Point2D) => `${point.x},${point.y}`;
-    boundaryEdges.forEach(([start, end]) => {
-        const startNeighbors = adjacency.get(pointKey(start)) ?? [];
-        startNeighbors.push(end);
-        adjacency.set(pointKey(start), startNeighbors);
-    });
+    // Vertical boundary runs: right edges go top-to-bottom; left edges go
+    // bottom-to-top to close the clockwise/counter-clockwise loops.
+    for (let x = 0; x < width; x += 1) {
+        let y = 0;
+        while (y < height) {
+            if (!isOccupied(x, y)) {
+                y += 1;
+                continue;
+            }
 
-    const visitedEdges = new Set<string>();
-    const edgeKey = (start: Point2D, end: Point2D) => `${pointKey(start)}>${pointKey(end)}`;
+            const leftBoundary = !isOccupied(x - 1, y);
+            const rightBoundary = !isOccupied(x + 1, y);
+            const startY = y;
+            let endY = y + 1;
+            while (
+                endY < height &&
+                isOccupied(x, endY) &&
+                (!isOccupied(x - 1, endY) === leftBoundary) &&
+                (!isOccupied(x + 1, endY) === rightBoundary)
+            ) {
+                endY += 1;
+            }
+
+            if (rightBoundary) {
+                addEdge(vertexId(x + 1, startY), vertexId(x + 1, endY));
+            }
+            if (leftBoundary) {
+                addEdge(vertexId(x, endY), vertexId(x, startY));
+            }
+            y = endY;
+        }
+    }
+
+    const visitedEdges = new Uint8Array(edgeStarts.length);
+    const pointFromId = (id: number): Point2D => ({
+        x: offsetX + (id % vertexStride),
+        y: offsetY + Math.floor(id / vertexStride),
+    });
     const loops: Point2D[][] = [];
 
-    boundaryEdges.forEach(([start, end]) => {
-        const initialKey = edgeKey(start, end);
-        if (visitedEdges.has(initialKey)) {
-            return;
+    for (let initialEdge = 0; initialEdge < edgeStarts.length; initialEdge += 1) {
+        if (visitedEdges[initialEdge] !== 0) {
+            continue;
         }
 
-        const loop: Point2D[] = [start];
+        const start = edgeStarts[initialEdge];
+        const loopIds: number[] = [start];
         let current = start;
-        let next = end;
+        let edgeId = initialEdge;
         let guard = 0;
 
-        while (guard < boundaryEdges.size * 2) {
+        while (guard < edgeStarts.length * 2) {
             guard += 1;
-            visitedEdges.add(edgeKey(current, next));
-            current = next;
-            if (pointKey(current) === pointKey(start)) {
+            visitedEdges[edgeId] = 1;
+            current = edgeEnds[edgeId];
+            if (current === start) {
                 break;
             }
 
-            loop.push(current);
-            const candidates = adjacency.get(pointKey(current)) ?? [];
-            const candidate = candidates.find((point) => !visitedEdges.has(edgeKey(current, point)));
-            if (!candidate) {
+            loopIds.push(current);
+            const candidates = outgoing.get(current) ?? [];
+            const nextEdge = candidates.find((candidate) => visitedEdges[candidate] === 0);
+            if (nextEdge === undefined) {
                 break;
             }
-            next = candidate;
+            edgeId = nextEdge;
         }
 
-        if (loop.length >= 3 && pointKey(current) === pointKey(start)) {
-            loops.push(loop);
+        if (loopIds.length >= 3 && current === start) {
+            loops.push(loopIds.map(pointFromId));
         }
-    });
+    }
 
     return loops;
 };

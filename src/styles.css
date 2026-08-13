@@ -6,6 +6,12 @@ body,
     margin: 0;
 }
 
+*,
+*::before,
+*::after {
+    box-sizing: border-box;
+}
+
 body {
     overflow: hidden;
     background: #f4f1ea;
@@ -27,11 +33,15 @@ canvas {
 
 .part-panel {
     height: 100%;
+    min-height: 0;
     padding: 14px;
     display: flex;
     flex-direction: column;
     gap: 10px;
-    overflow: hidden;
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
     background: rgba(255, 251, 245, 0.82);
     border: 1px solid rgba(24, 21, 18, 0.1);
     backdrop-filter: blur(16px);
@@ -81,6 +91,8 @@ canvas {
 }
 
 .projection-controls {
+    flex: 0 0 auto;
+    min-height: max-content;
     display: flex;
     flex-direction: column;
     gap: 8px;
@@ -112,6 +124,35 @@ canvas {
     width: 100%;
 }
 
+.projection-select {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    font-size: 12px;
+}
+
+.projection-advanced {
+  margin: 8px 0;
+  padding: 6px 8px;
+  background: rgba(255, 255, 255, 0.32);
+  border: 1px solid rgba(81, 68, 61, 0.22);
+  border-radius: 4px;
+}
+
+.projection-advanced summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: #51443d;
+}
+
+.projection-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 7px;
+  font-size: 12px;
+}
+
 .projection-color-control {
     display: flex;
     align-items: center;
@@ -130,9 +171,12 @@ canvas {
 
 .part-list {
     position: relative;
-    flex: 1 1 auto;
+    flex: 0 0 320px;
+    height: 320px;
+    max-height: 320px;
+    min-height: 160px;
     overflow: auto;
-    min-height: 0;
+    overscroll-behavior: contain;
 }
 
 .part-list-spacer {
@@ -205,8 +249,20 @@ canvas {
     border-color: #181512;
 }
 
+.part-focus-chip {
+    flex: 0 0 72px;
+    padding: 6px 8px;
+    border: 1px solid rgba(24, 21, 18, 0.12);
+    background: rgba(255, 255, 255, 0.72);
+    color: inherit;
+    cursor: pointer;
+    font-size: 10px;
+    text-transform: uppercase;
+}
+
 .debug-panel {
     flex: 0 0 220px;
+    max-height: 220px;
     min-height: 220px;
     margin-top: 8px;
     padding-top: 8px;

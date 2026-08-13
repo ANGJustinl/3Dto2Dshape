@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import type { PaintLayerKind } from './2DRenderShared/types';
+import type { FocusLevel, MacroGroup, PaintLayerKind } from './2DRenderShared/types';
 
 export type PartNode = {
     id: string;
@@ -69,6 +69,15 @@ export type ProjectionTriangleSource = {
 
 export type ProjectionPartSource = {
     leafId: string;
+    label: string;
+    materialNames: string[];
+    parentPath: string;
+    focusLevel?: Exclude<FocusLevel, 'auto'>;
+    macroGroup?: MacroGroup;
+    shapeBudget?: number;
+    simplifyMultiplier?: number;
+    accentScore?: number;
+    connectivityRole?: 'normal' | 'bridge' | 'accent';
     sourceLeafId?: string;
     paintLayer?: PaintLayerKind;
     mesh: THREE.Mesh | THREE.SkinnedMesh;
@@ -1204,6 +1213,9 @@ const buildMeshSegmentation = (
                 if (cluster.triangles.length >= 1) {
                     projectionParts.push({
                         leafId,
+                        label: materialName,
+                        materialNames: [materialName],
+                        parentPath: mesh.name || mesh.uuid,
                         mesh,
                         triangleCount: cluster.triangles.length,
                         color: colorLabel,
