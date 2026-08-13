@@ -185,8 +185,16 @@ function PartPanel({
     const next = FOCUS_CYCLE[(FOCUS_CYCLE.indexOf(current) + 1) % FOCUS_CYCLE.length];
     const nextOverrides = { ...projectionSettings.partOverrides };
     if (next === 'auto') {
-      const { [partId]: _removed, ...rest } = nextOverrides;
-      onProjectionSettingsChange({ ...projectionSettings, partOverrides: rest });
+      const currentOverride = nextOverrides[partId];
+      if (currentOverride) {
+        const { focusLevel: _focusLevel, ...restOverride } = currentOverride;
+        if (Object.keys(restOverride).length === 0) {
+          delete nextOverrides[partId];
+        } else {
+          nextOverrides[partId] = restOverride;
+        }
+      }
+      onProjectionSettingsChange({ ...projectionSettings, partOverrides: nextOverrides });
       return;
     }
     nextOverrides[partId] = {
