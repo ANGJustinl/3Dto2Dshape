@@ -133,26 +133,26 @@ export const buildProjectedPartShapeFromRasterData = (
     let normalX = 0;
     let normalY = 0;
     let normalZ = 0;
+    const left = new THREE.Vector3();
+    const middle = new THREE.Vector3();
+    const right = new THREE.Vector3();
+    const edge1 = new THREE.Vector3();
+    const edge2 = new THREE.Vector3();
+    const normal = new THREE.Vector3();
+
     part.triangles.forEach((triangle) => {
         const [a, b, c] = triangle.vertexIndices;
         minDepth = Math.min(minDepth, projectionCache.depth[a], projectionCache.depth[b], projectionCache.depth[c]);
         maxDepth = Math.max(maxDepth, projectionCache.depth[a], projectionCache.depth[b], projectionCache.depth[c]);
-        const left = new THREE.Vector3(
-            projectionCache.worldX[a],
-            projectionCache.worldY[a],
-            projectionCache.worldZ[a],
-        );
-        const middle = new THREE.Vector3(
-            projectionCache.worldX[b],
-            projectionCache.worldY[b],
-            projectionCache.worldZ[b],
-        );
-        const right = new THREE.Vector3(
-            projectionCache.worldX[c],
-            projectionCache.worldY[c],
-            projectionCache.worldZ[c],
-        );
-        const normal = middle.sub(left).cross(right.sub(left)).normalize();
+
+        left.set(projectionCache.worldX[a], projectionCache.worldY[a], projectionCache.worldZ[a]);
+        middle.set(projectionCache.worldX[b], projectionCache.worldY[b], projectionCache.worldZ[b]);
+        right.set(projectionCache.worldX[c], projectionCache.worldY[c], projectionCache.worldZ[c]);
+
+        edge1.copy(middle).sub(left);
+        edge2.copy(right).sub(left);
+        normal.copy(edge1).cross(edge2).normalize();
+
         normalX += normal.x;
         normalY += normal.y;
         normalZ += normal.z;
