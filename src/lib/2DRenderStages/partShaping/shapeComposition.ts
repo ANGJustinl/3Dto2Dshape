@@ -76,16 +76,23 @@ const createUnionFind = (count: number) => {
 };
 
 const getShapeBounds = (shape: ProjectedPartShape) => {
-    const points = shape.loops.flat();
-    if (points.length === 0) {
-        return null;
-    }
-    return {
-        minX: Math.min(...points.map((point) => point.x)),
-        minY: Math.min(...points.map((point) => point.y)),
-        maxX: Math.max(...points.map((point) => point.x)),
-        maxY: Math.max(...points.map((point) => point.y)),
-    };
+    let minX = Number.POSITIVE_INFINITY;
+    let minY = Number.POSITIVE_INFINITY;
+    let maxX = Number.NEGATIVE_INFINITY;
+    let maxY = Number.NEGATIVE_INFINITY;
+    let hasPoint = false;
+
+    shape.loops.forEach((loop) => {
+        loop.forEach((point) => {
+            hasPoint = true;
+            minX = Math.min(minX, point.x);
+            minY = Math.min(minY, point.y);
+            maxX = Math.max(maxX, point.x);
+            maxY = Math.max(maxY, point.y);
+        });
+    });
+
+    return hasPoint ? { minX, minY, maxX, maxY } : null;
 };
 
 const boundsCanTouch = (
