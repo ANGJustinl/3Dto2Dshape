@@ -7,15 +7,17 @@ export const filterSmallProjectedPartShapes = (
     shapes: ProjectedPartShape[],
     minShapeArea = MIN_RENDERED_PART_SCREEN_AREA,
     focusMultipliers: Partial<Record<ProjectedPartShape['focusLevel'], number>> = {},
+    preserveProtectedShapes = true,
 ) =>
     shapes
         .map((shape) => ({
             ...shape,
             loops: shape.loops.filter(
                 (loop) =>
-                    shape.connectivityRole === 'bridge' ||
-                    shape.connectivityRole === 'accent' ||
-                    (shape.accentScore ?? 0) >= 0.65 ||
+                    (preserveProtectedShapes &&
+                        (shape.connectivityRole === 'bridge' ||
+                            shape.connectivityRole === 'accent' ||
+                            (shape.accentScore ?? 0) >= 0.65)) ||
                     Math.abs(polygonArea(loop)) >=
                         minShapeArea * (focusMultipliers[shape.focusLevel] ?? 1),
             ),

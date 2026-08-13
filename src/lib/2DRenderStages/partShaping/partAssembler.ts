@@ -22,7 +22,7 @@ export const buildProjectedPartShapeFromRasterData = (
     rasterData: GpuRasterizedPartData,
 ) => {
     const modeDefaults = getStyleModeDefaults(settings.styleMode);
-    const simplifyMultiplier = part.simplifyMultiplier ?? 1;
+    const simplifyMultiplier = settings.enableComposition ? part.simplifyMultiplier ?? 1 : 1;
     const sharedChainsStart = performance.now();
     const projectedSharedChains = buildProjectedSharedChainsForPart(
         part,
@@ -79,7 +79,7 @@ export const buildProjectedPartShapeFromRasterData = (
             );
             return perturbPaintLoop(
                 simplified,
-                projectedSharedChains.chains.length === 0
+                settings.enableEdgeDistortion && projectedSharedChains.chains.length === 0
                     ? settings.edgeRoughness * modeDefaults.edgeRoughnessScale
                     : 0,
                 seed,

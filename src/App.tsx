@@ -59,6 +59,10 @@ const VMD_ANIMATION_OPTIONS = [
         label: 'Aerial',
         value: 'Aerial.vmd',
     },
+    {
+        label: 'wavefile_v2',
+        value: 'wavefile_v2.vmd',
+    },
 ] as const;
 
 let ammoPromise: Promise<unknown> | null = null;
@@ -314,6 +318,9 @@ function App() {
         minShapeArea: 8,
         edgeRoughness: 0.35,
         edgeSmoothing: 'soft',
+        enableComposition: false,
+        enableShapeTracking: false,
+        enableEdgeDistortion: false,
         compositionMode: 'vector',
         boundaryGuard: 'outerDepthNormal',
         depthMergeThreshold: 0.035,
@@ -374,6 +381,10 @@ function App() {
 
     useEffect(() => {
         projectionSettingsRef.current = projectionSettings;
+        // A style-only change must refresh the overlay once even when the
+        // model is paused. The animation loop otherwise has no scene motion
+        // to use as an invalidation signal.
+        forceProjectionRefreshRef.current = true;
     }, [projectionSettings]);
 
     useEffect(() => {
@@ -898,6 +909,7 @@ function App() {
         const webGpuProjector = getWebGpuScreenProjector();
         let projectionFrameId = 0;
         let submittedProjectionTick = -1;
+        let lastSubmittedProjectionFrameId = -1;
         const animate = () => {
             if (disposed) {
                 return;
@@ -917,7 +929,7 @@ function App() {
             if (!playbackPausedRef.current && model && 'update' in model && typeof model.update === 'function') {
                 model.update(delta);
             }
-            controls.update();
+            const controlsChanged = controls.update();
             renderer.render(scene, camera);
             const resultPane = resultPaneRef.current;
             const resultWidth = resultPane?.clientWidth ?? 0;
@@ -926,18 +938,31 @@ function App() {
             const currentStride = Math.max(1, Math.floor(frameStrideRef.current));
             const projectionTick = Math.floor((projectionFrameId - 1) / currentStride);
             const shouldSubmitProjection =
-                projectionTick !== submittedProjectionTick || forceProjectionRefreshRef.current;
+                (!playbackPausedRef.current && projectionTick !== submittedProjectionTick) ||
+                controlsChanged ||
+                forceProjectionRefreshRef.current;
 
             if (shouldSubmitProjection && projectionMaskStateRef.current) {
+                const reuseProjectionFrame =
+                    playbackPausedRef.current &&
+                    !controlsChanged &&
+                    forceProjectionRefreshRef.current &&
+                    lastSubmittedProjectionFrameId >= 0;
+                const renderFrameId = reuseProjectionFrame
+                    ? lastSubmittedProjectionFrameId
+                    : projectionFrameId;
                 submittedProjectionTick = projectionTick;
                 forceProjectionRefreshRef.current = false;
-                webGpuProjector.requestFrame(
-                    projectionPartsRef.current,
-                    camera,
-                    resultWidth,
-                    resultHeight,
-                    projectionFrameId,
-                );
+                if (!reuseProjectionFrame) {
+                    lastSubmittedProjectionFrameId = projectionFrameId;
+                    webGpuProjector.requestFrame(
+                        projectionPartsRef.current,
+                        camera,
+                        resultWidth,
+                        resultHeight,
+                        renderFrameId,
+                    );
+                }
                 projectionOverlayRef.current?.renderFrame(
                     renderer,
                     scene,
@@ -949,7 +974,7 @@ function App() {
                     projectionMaskStateRef.current,
                     projectionSettingsRef.current,
                     visibleLeafIdsRef.current,
-                    projectionFrameId,
+                    renderFrameId,
                 );
             }
         };

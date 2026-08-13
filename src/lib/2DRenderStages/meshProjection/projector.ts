@@ -78,16 +78,22 @@ const toVec4FloatArray = (
     return data;
 };
 
-const toSkinnedLocalPositions = (mesh: MeshLike) => {
+/**
+ * Match the position path used by Three.js' renderer/raycaster.  MMD facial
+ * animation is stored as morph-target influences (嘴/眼睛), not bone motion.
+ * Reading the raw position attribute and only calling applyBoneTransform()
+ * silently drops those morphs from the projection pass.
+ */
+export const toAnimatedLocalPositions = (mesh: MeshLike) => {
     const positionAttribute = mesh.geometry.getAttribute('position');
     const positions = new Float32Array(positionAttribute.count * 4);
     const vector = new THREE.Vector3();
 
     for (let vertexIndex = 0; vertexIndex < positionAttribute.count; vertexIndex += 1) {
-        vector.fromBufferAttribute(positionAttribute, vertexIndex);
-        if (mesh instanceof THREE.SkinnedMesh) {
-            mesh.applyBoneTransform(vertexIndex, vector);
-        }
+        // Mesh.getVertexPosition applies morph targets. SkinnedMesh overrides
+        // it and then applies skinning, so this covers both animation paths
+        // without applying the bone transform twice.
+        mesh.getVertexPosition(vertexIndex, vector);
         const offset = vertexIndex * 4;
         positions[offset] = vector.x;
         positions[offset + 1] = vector.y;
@@ -162,7 +168,7 @@ class WebGpuProjectionPipeline {
 
                 meshSnapshots.push({
                     mesh,
-                    positions: toSkinnedLocalPositions(mesh),
+                    positions: toAnimatedLocalPositions(mesh),
                     matrixWorld: new Float32Array(flattenMatrix4(mesh.matrixWorld)),
                     bindMatrix: new Float32Array(flattenMatrix4(bindMatrix)),
                     bindMatrixInverse: new Float32Array(flattenMatrix4(bindMatrixInverse)),

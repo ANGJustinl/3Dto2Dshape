@@ -20,6 +20,9 @@ export type ProjectionOverlaySettings = {
     minShapeArea: number;
     edgeRoughness: number;
     edgeSmoothing: EdgeSmoothing;
+    enableComposition: boolean;
+    enableShapeTracking: boolean;
+    enableEdgeDistortion: boolean;
     compositionMode: CompositionMode;
     boundaryGuard: BoundaryGuard;
     depthMergeThreshold: number;

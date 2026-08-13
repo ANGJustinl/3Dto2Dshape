@@ -548,6 +548,48 @@ function PartPanel({
             <option value="open">Open</option>
           </select>
         </label>
+        <details className="projection-advanced">
+          <summary>Advanced / Experimental</summary>
+          <label className="projection-check">
+            <input
+              type="checkbox"
+              checked={projectionSettings.enableComposition}
+              onChange={(event) =>
+                onProjectionSettingsChange({
+                  ...projectionSettings,
+                  enableComposition: event.currentTarget.checked,
+                })
+              }
+            />
+            <span>Enable Composition</span>
+          </label>
+          <label className="projection-check">
+            <input
+              type="checkbox"
+              checked={projectionSettings.enableShapeTracking}
+              onChange={(event) =>
+                onProjectionSettingsChange({
+                  ...projectionSettings,
+                  enableShapeTracking: event.currentTarget.checked,
+                })
+              }
+            />
+            <span>Enable Shape Tracking</span>
+          </label>
+          <label className="projection-check">
+            <input
+              type="checkbox"
+              checked={projectionSettings.enableEdgeDistortion}
+              onChange={(event) =>
+                onProjectionSettingsChange({
+                  ...projectionSettings,
+                  enableEdgeDistortion: event.currentTarget.checked,
+                })
+              }
+            />
+            <span>Enable Edge Distortion</span>
+          </label>
+        </details>
         <label className="projection-slider">
           <span>Focal Budget {projectionSettings.focusShapeBudgets.focal}</span>
           <input
