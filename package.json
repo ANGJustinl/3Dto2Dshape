@@ -10,10 +10,12 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "mp4-muxer": "^5.2.2",
     "polygon-clipping": "^0.15.7",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
-    "three": "0.171.0"
+    "three": "0.171.0",
+    "webm-muxer": "^5.1.4"
   },
   "devDependencies": {
     "@types/react": "^19.2.18",

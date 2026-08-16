@@ -8,9 +8,10 @@ type GPUComputePipelineLike = any;
 type GPUDeviceLike = any;
 type GPUTextureLike = any;
 
-export type GpuRasterizedPartData = {
+export type RasterizedPartData = {
     occupied: Uint8Array;
     depth: Float32Array;
+    loops?: Array<Array<{ x: number; y: number }>>;
     nearestDepth: number;
     width: number;
     height: number;
@@ -22,6 +23,8 @@ export type GpuRasterizedPartData = {
     atlasHeight: number;
     orientedBounds: OrientedBounds2D;
 };
+
+export type GpuRasterizedPartData = RasterizedPartData;
 
 export type GpuDepthAtlasState = {
     texture: GPUTextureLike;
@@ -64,6 +67,7 @@ const GPUBufferUsageMapRead = 0x0001;
 const GPUTextureUsageStorageBinding = 0x0008;
 const GPUTextureUsageTextureBinding = 0x0004;
 const GPUTextureUsageCopySrc = 0x0001;
+const GPUTextureUsageCopyDst = 0x0002;
 
 const computePartBounds = (
     part: ProjectionPartSource,
@@ -550,7 +554,7 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
         this.completedDepthTexture = device.createTexture({
             size: { width: atlasWidth, height: atlasHeight, depthOrArrayLayers: 1 },
             format: DEPTH_FORMAT,
-            usage: GPUTextureUsageStorageBinding | GPUTextureUsageTextureBinding,
+            usage: GPUTextureUsageStorageBinding | GPUTextureUsageTextureBinding | GPUTextureUsageCopyDst,
         });
         this.atlasWidth = atlasWidth;
         this.atlasHeight = atlasHeight;
@@ -695,6 +699,64 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
             width: this.atlasWidth,
             height: this.atlasHeight,
         };
+    }
+
+    async uploadDepthAtlasFromRasterData(rasterResults: Array<RasterizedPartData | null>) {
+        const device = await this.getDevice();
+        if (!device) {
+            return null;
+        }
+
+        const atlasMaxWidth = 2048;
+        const atlasPadding = ATLAS_PADDING;
+        let cursorX = 0;
+        let cursorY = 0;
+        let rowHeight = 0;
+        const validResults = rasterResults.filter((result): result is RasterizedPartData => result !== null);
+
+        validResults.forEach((result) => {
+            if (cursorX > 0 && cursorX + result.width > atlasMaxWidth) {
+                cursorX = 0;
+                cursorY += rowHeight + atlasPadding;
+                rowHeight = 0;
+            }
+            result.atlasX = cursorX;
+            result.atlasY = cursorY;
+            cursorX += result.width + atlasPadding;
+            rowHeight = Math.max(rowHeight, result.height);
+        });
+
+        const atlasWidth = Math.max(1, validResults.reduce((max, result) => Math.max(max, result.atlasX + result.width), 1));
+        const atlasHeight = Math.max(1, validResults.reduce((max, result) => Math.max(max, result.atlasY + result.height), 1));
+        this.ensureAtlasTextures(device, atlasWidth, atlasHeight);
+
+        const bytesPerRow = Math.ceil((atlasWidth * Float32Array.BYTES_PER_ELEMENT) / 256) * 256;
+        const bytes = new Uint8Array(bytesPerRow * atlasHeight);
+        const atlasFloats = new Float32Array(bytes.buffer);
+        const atlasStride = bytesPerRow / Float32Array.BYTES_PER_ELEMENT;
+        for (let row = 0; row < atlasHeight; row += 1) {
+            atlasFloats.fill(Number.POSITIVE_INFINITY, row * atlasStride, (row + 1) * atlasStride);
+        }
+
+        validResults.forEach((result) => {
+            result.atlasWidth = atlasWidth;
+            result.atlasHeight = atlasHeight;
+            for (let row = 0; row < result.height; row += 1) {
+                const sourceStart = row * result.width;
+                const sourceEnd = sourceStart + result.width;
+                const targetStart = (result.atlasY + row) * atlasStride + result.atlasX;
+                atlasFloats.set(result.depth.subarray(sourceStart, sourceEnd), targetStart);
+            }
+        });
+
+        device.queue.writeTexture(
+            { texture: this.completedDepthTexture },
+            bytes,
+            { bytesPerRow, rowsPerImage: atlasHeight },
+            { width: atlasWidth, height: atlasHeight, depthOrArrayLayers: 1 },
+        );
+
+        return this.getDepthAtlasState();
     }
 }
 

@@ -54,6 +54,7 @@ const getProjectionGeometrySignature = (settings: ProjectionOverlaySettings) =>
         normalMergeThreshold: settings.normalMergeThreshold,
         gapMergeThreshold: settings.gapMergeThreshold,
         partOverrides: settings.partOverrides,
+        cpuRasterBackend: settings.cpuRasterBackend ?? 'ts',
     });
 
 const restyleProjectionResult = (
@@ -84,6 +85,16 @@ export class OverlayRenderPipeline {
     private droppedQueuedFrames = 0;
     private readonly shapeTrackState = new ShapeTrackState();
     private projectionCache: ProjectionCacheEntry | null = null;
+    private idleWaiters: Array<() => void> = [];
+
+    waitForIdle() {
+        if (!this.processing && this.queuedJob === null) {
+            return Promise.resolve();
+        }
+        return new Promise<void>((resolve) => {
+            this.idleWaiters.push(resolve);
+        });
+    }
 
     async enqueue(
         canvas: HTMLCanvasElement | null,
@@ -199,6 +210,12 @@ export class OverlayRenderPipeline {
                       );
                 const shapingMs = performance.now() - shapingStart;
                 if (!projectionResult) {
+                    await clear2DRenderComposition(
+                        canvas,
+                        job.viewportWidth,
+                        job.viewportHeight,
+                        job.settings,
+                    );
                     continue;
                 }
                 if (!canReuseProjection) {
@@ -279,6 +296,7 @@ export class OverlayRenderPipeline {
                         compositionEnabled: job.settings.enableComposition ? 1 : 0,
                         trackingEnabled: job.settings.enableShapeTracking ? 1 : 0,
                         edgeDistortionEnabled: job.settings.enableEdgeDistortion ? 1 : 0,
+                        cpuRasterBackend: job.settings.cpuRasterBackend === 'wasm' ? 1 : job.settings.cpuRasterBackend === 'auto' ? 2 : 0,
                         shapeCount: filteredShapes.length,
                         droppedQueuedFrames: this.droppedQueuedFrames,
                         total: overlayMs,
@@ -290,6 +308,9 @@ export class OverlayRenderPipeline {
             this.processing = false;
             if (this.queuedJob) {
                 await this.processQueue(canvas);
+            } else {
+                const waiters = this.idleWaiters.splice(0);
+                waiters.forEach((resolve) => resolve());
             }
         }
     }

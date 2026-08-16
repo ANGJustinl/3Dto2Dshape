@@ -3,5 +3,6 @@ models
 .npm-cache
 dist
 node_modules
+emsdk
 package-lock.json
 tsconfig.app.tsbuildinfo

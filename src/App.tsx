@@ -22,6 +22,12 @@ import {
 import { createProjectionMaskState } from './lib/2DRenderShared/maskState';
 import { getWebGpuScreenProjector } from './lib/2DRenderStages/meshProjection/projector';
 import { getSharedWebGpuContext } from './lib/webgpuShared';
+import { getRasterContourClient } from './lib/wasm/rasterContourClient';
+import {
+    exportVideo,
+    type ExportFrameCanvases,
+    type ExportVideoSettings,
+} from './lib/export/videoExporter';
 
 type MaterialState = {
     visible: boolean;
@@ -29,7 +35,7 @@ type MaterialState = {
 
 type GpuStatus = 'checking' | 'ready' | 'webgpu-unavailable' | 'webgpu-error';
 type AssetStatus = 'loading-model' | 'loading-textures' | 'ready' | 'model-error';
-type RuntimeStatus = GpuStatus | AssetStatus;
+type RuntimeStatus = GpuStatus | AssetStatus | 'wasm-loading' | 'wasm-failed' | 'wasm-timed-out';
 
 const RUNTIME_STATUS_LABELS: Record<RuntimeStatus, string> = {
     checking: 'Checking WebGPU…',
@@ -39,10 +45,15 @@ const RUNTIME_STATUS_LABELS: Record<RuntimeStatus, string> = {
     'loading-textures': 'Waiting for model textures…',
     ready: 'Ready',
     'model-error': 'Model failed to load. Check the external models directory.',
+    'wasm-loading': 'Initializing CPU raster WASM…',
+    'wasm-failed': 'WASM initialization failed. Choose TypeScript fallback or retry in Advanced settings.',
+    'wasm-timed-out': 'WASM initialization timed out. Choose TypeScript fallback or retry in Advanced settings.',
 };
 
 const INITIAL_POSE_ANIMATION_VALUE = '__initial_pose__';
 const ANIMATION_FRAME_SECONDS = 1 / 30;
+
+type ExportFrameProvider = (frame: number) => Promise<ExportFrameCanvases>;
 
 // Runtime assets are served from public/models. Keep the downloaded folder name
 // encoded so the Chinese model directory remains a valid URL segment.
@@ -302,17 +313,17 @@ function App() {
     const projectionSettingsRef = useRef<ProjectionOverlaySettings>({
         enabled: true,
         styleMode: 'animationStable',
-        simplifyEpsilon: 4,
+        simplifyEpsilon: 0,
         strokeWidth: 1.25,
         showContours: false,
         opacity: 1,
         minTriangleCount: 1,
-        backgroundColor: '#FFFDF8',
+        backgroundColor: '#FFA8A8',
         outlineColor: '#51443D',
         outlineOpacity: 0.72,
         shadowStrength: 0.38,
         highlightStrength: 0.24,
-        shadowThreshold: 0.08,
+        shadowThreshold: -0.30,
         highlightThreshold: 0.62,
         lightDirection: [0.35, 0.8, 0.45],
         minShapeArea: 8,
@@ -335,6 +346,7 @@ function App() {
         },
         mergeColorThreshold: 0.12,
         partOverrides: {},
+        cpuRasterBackend: 'auto',
     });
     const visibleLeafIdsRef = useRef<Set<string> | null>(null);
     const selectedAnimationRef = useRef<string>(VMD_ANIMATION_OPTIONS[0].value);
@@ -346,8 +358,11 @@ function App() {
     const frameStrideRef = useRef(2);
     const playbackPausedRef = useRef(false);
     const forceProjectionRefreshRef = useRef(true);
+    const forceNewProjectionFrameRef = useRef(false);
     const currentAnimationTimeRef = useRef(0);
     const currentAnimationDurationRef = useRef(0);
+    const setAnimationTimeRef = useRef<((timeSeconds: number) => void) | null>(null);
+    const exportFrameRef = useRef<ExportFrameProvider | null>(null);
     const [parts, setParts] = useState<PartNode[]>([]);
     const [debugMaterials, setDebugMaterials] = useState<MaterialDebugInfo[]>([]);
     const [selectedPartId, setSelectedPartId] = useState<string | null>(null);
@@ -357,10 +372,21 @@ function App() {
     const [selectedAnimation, setSelectedAnimation] = useState<string>(
         VMD_ANIMATION_OPTIONS[0].value,
     );
+    const [animationFrameCount, setAnimationFrameCount] = useState(1);
     const [frameStride, setFrameStride] = useState(2);
     const [isPlaybackPaused, setIsPlaybackPaused] = useState(false);
     const [gpuStatus, setGpuStatus] = useState<GpuStatus>('checking');
     const [assetStatus, setAssetStatus] = useState<AssetStatus>('loading-model');
+    const [wasmSnapshot, setWasmSnapshot] = useState(() => getRasterContourClient().getSnapshot());
+
+    useEffect(() => getRasterContourClient().subscribe(setWasmSnapshot), []);
+
+    useEffect(() => {
+        if ((projectionSettings.cpuRasterBackend ?? 'ts') === 'ts') {
+            return;
+        }
+        void getRasterContourClient().initialize();
+    }, [projectionSettings.cpuRasterBackend]);
 
     useEffect(() => {
         const context = getSharedWebGpuContext();
@@ -497,6 +523,7 @@ function App() {
             helperAttached = true;
             currentAnimationTimeRef.current = 0;
             currentAnimationDurationRef.current = animation.duration;
+            setAnimationFrameCount(Math.max(1, Math.ceil(animation.duration / ANIMATION_FRAME_SECONDS)));
 
             const mmdMeta = (
                 targetMesh.geometry.userData as {
@@ -530,6 +557,7 @@ function App() {
                     physics: true,
                 });
                 forceProjectionRefreshRef.current = true;
+                forceNewProjectionFrameRef.current = true;
                 console.log('Applied VMD animation with physics.', {
                     clip: animation.name,
                     trackCount: animation.tracks.length,
@@ -542,6 +570,7 @@ function App() {
                         physics: false,
                     });
                     forceProjectionRefreshRef.current = true;
+                    forceNewProjectionFrameRef.current = true;
                     console.log('Applied VMD animation without physics.', {
                         clip: animation.name,
                         trackCount: animation.tracks.length,
@@ -565,7 +594,9 @@ function App() {
             pendingVmdAnimation = null;
             currentAnimationTimeRef.current = 0;
             currentAnimationDurationRef.current = 0;
+            setAnimationFrameCount(1);
             forceProjectionRefreshRef.current = true;
+            forceNewProjectionFrameRef.current = true;
 
             try {
                 mmdHelper.remove(targetMesh);
@@ -626,6 +657,35 @@ function App() {
             targetMesh.updateMatrixWorld(true);
             modelRef.current?.updateMatrixWorld(true);
             forceProjectionRefreshRef.current = true;
+            forceNewProjectionFrameRef.current = true;
+        };
+
+        setAnimationTimeRef.current = setAnimationTime;
+        exportFrameRef.current = async (frame: number) => {
+            if (!targetMeshForAnimation || currentAnimationDurationRef.current <= 0) {
+                targetMeshForAnimation?.updateMatrixWorld(true);
+                // Initial-pose exports still need a fresh projection request
+                // when the current canvas happens to contain an older frame.
+                forceProjectionRefreshRef.current = true;
+                forceNewProjectionFrameRef.current = true;
+            } else {
+                const duration = currentAnimationDurationRef.current;
+                const time = Math.min(
+                    Math.max(0, frame * ANIMATION_FRAME_SECONDS),
+                    Math.max(0, duration - ANIMATION_FRAME_SECONDS * 0.001),
+                );
+                setAnimationTime(time);
+            }
+
+            // Let the normal animation loop submit the projection request and
+            // let the overlay pipeline finish the corresponding frame.
+            await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+            await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+            await projectionOverlayRef.current?.waitForIdle();
+            return {
+                overlay: projectionOverlayRef.current?.getCanvas() ?? null,
+                model: renderer.domElement,
+            };
         };
 
         const stepAnimationByFrames = (frameCount: number) => {
@@ -943,16 +1003,19 @@ function App() {
                 forceProjectionRefreshRef.current;
 
             if (shouldSubmitProjection && projectionMaskStateRef.current) {
+                const forceNewProjectionFrame = forceNewProjectionFrameRef.current;
                 const reuseProjectionFrame =
                     playbackPausedRef.current &&
                     !controlsChanged &&
                     forceProjectionRefreshRef.current &&
+                    !forceNewProjectionFrame &&
                     lastSubmittedProjectionFrameId >= 0;
                 const renderFrameId = reuseProjectionFrame
                     ? lastSubmittedProjectionFrameId
                     : projectionFrameId;
                 submittedProjectionTick = projectionTick;
                 forceProjectionRefreshRef.current = false;
+                forceNewProjectionFrameRef.current = false;
                 if (!reuseProjectionFrame) {
                     lastSubmittedProjectionFrameId = projectionFrameId;
                     webGpuProjector.requestFrame(
@@ -987,6 +1050,8 @@ function App() {
 
         return () => {
             disposed = true;
+            setAnimationTimeRef.current = null;
+            exportFrameRef.current = null;
             if (segmentationTimer !== null) {
                 window.clearTimeout(segmentationTimer);
             }
@@ -1012,7 +1077,39 @@ function App() {
         };
     }, []);
 
-    const runtimeStatus: RuntimeStatus = gpuStatus === 'ready' ? assetStatus : gpuStatus;
+    const handleExportVideo = async (
+        settings: ExportVideoSettings,
+        onProgress: (completed: number, total: number) => void,
+        signal: AbortSignal,
+    ) => {
+        const frameProvider = exportFrameRef.current;
+        if (!frameProvider) {
+            throw new Error('The model and projection are not ready for export.');
+        }
+
+        const previousPaused = playbackPausedRef.current;
+        const previousTime = currentAnimationTimeRef.current;
+        playbackPausedRef.current = true;
+        setIsPlaybackPaused(true);
+        try {
+            await exportVideo(settings, frameProvider, onProgress, signal);
+        } finally {
+            setAnimationTimeRef.current?.(previousTime);
+            playbackPausedRef.current = previousPaused;
+            setIsPlaybackPaused(previousPaused);
+        }
+    };
+
+    const baseRuntimeStatus: RuntimeStatus = gpuStatus === 'ready' ? assetStatus : gpuStatus;
+    const requestedCpuBackend = projectionSettings.cpuRasterBackend ?? 'ts';
+    const runtimeStatus: RuntimeStatus =
+        baseRuntimeStatus !== 'ready' || requestedCpuBackend === 'ts' || wasmSnapshot.status === 'ready'
+            ? baseRuntimeStatus
+            : wasmSnapshot.status === 'timed-out'
+              ? 'wasm-timed-out'
+              : wasmSnapshot.status === 'failed'
+                ? 'wasm-failed'
+                : 'wasm-loading';
 
     return (
         <div className="app-shell">
@@ -1034,6 +1131,9 @@ function App() {
                 onFrameStrideChange={setFrameStride}
                 onSelect={setSelectedPartId}
                 onProjectionSettingsChange={setProjectionSettings}
+                wasmSnapshot={wasmSnapshot}
+                animationFrameCount={animationFrameCount}
+                onExportVideo={handleExportVideo}
             />
             <div className="viewport-pane">
                 <div ref={mountRef} className="viewport" />

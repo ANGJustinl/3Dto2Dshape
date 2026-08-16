@@ -18,6 +18,8 @@ export type ProjectionOverlayHandle = {
         visibleLeafIds: Set<string> | null,
         frameId: number,
     ) => void;
+    getCanvas: () => HTMLCanvasElement | null;
+    waitForIdle: () => Promise<void>;
 };
 
 const ProjectionOverlay = forwardRef<ProjectionOverlayHandle>(function ProjectionOverlay(_, ref) {
@@ -50,6 +52,8 @@ const ProjectionOverlay = forwardRef<ProjectionOverlayHandle>(function Projectio
                 frameId,
             );
         },
+        getCanvas: () => canvasRef.current,
+        waitForIdle: () => overlayPipelineRef.current.waitForIdle(),
     }));
 
     return <canvas ref={canvasRef} className="projection-overlay" />;

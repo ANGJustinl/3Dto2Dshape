@@ -153,6 +153,87 @@ canvas {
   font-size: 12px;
 }
 
+.export-panel {
+    flex: 0 0 auto;
+    padding: 8px;
+    background: rgba(255, 255, 255, 0.42);
+    border: 1px solid rgba(81, 68, 61, 0.22);
+    border-radius: 4px;
+}
+
+.export-panel summary {
+    cursor: pointer;
+    color: #51443d;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.export-panel-body {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 8px;
+}
+
+.export-grid-2 {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+}
+
+.export-grid-2 input,
+.export-panel select {
+    width: 100%;
+    min-width: 0;
+    height: 34px;
+    padding: 0 8px;
+    border: 1px solid rgba(24, 21, 18, 0.12);
+    background: rgba(255, 255, 255, 0.72);
+    color: inherit;
+}
+
+.export-progress {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    font-size: 12px;
+}
+
+.export-error {
+    padding: 7px;
+    color: #8d2c25;
+    background: rgba(255, 218, 213, 0.72);
+    border: 1px solid rgba(141, 44, 37, 0.2);
+    font-size: 11px;
+    line-height: 1.35;
+    overflow-wrap: anywhere;
+}
+
+.export-hint {
+    color: rgba(81, 68, 61, 0.76);
+    font-size: 10px;
+    line-height: 1.35;
+}
+
+.wasm-status-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-top: 8px;
+    padding: 8px;
+    border: 1px solid rgba(81, 68, 61, 0.18);
+    background: rgba(255, 255, 255, 0.42);
+    font-size: 11px;
+    line-height: 1.35;
+    overflow-wrap: anywhere;
+}
+
+.wasm-actions {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    margin-top: 4px;
+}
+
 .projection-color-control {
     display: flex;
     align-items: center;

@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import type { GpuDepthAtlasState } from '../partRasterization/rasterizer';
+import type { GpuDepthAtlasState, RasterizedPartData } from '../partRasterization/rasterizer';
 import type { ProjectionPartSource } from '../../modelParts';
 import { recordPerfSample } from '../../perfLogger';
 import type { ProjectionFrameResult } from '../meshProjection/projector';
@@ -12,6 +12,7 @@ import { getGpuPartRasterizer, type GpuRasterizedPartData } from '../partRasteri
 import { buildProjectedPartShapeFromRasterData } from './partAssembler';
 import { getPaintLayerForShade, shadeColorForLayer } from '../../2DRenderShared/paintStyle';
 import { resolvePartStyle, type ResolvedPartStyle } from '../../2DRenderShared/focusResolver';
+import { getRasterContourClient } from '../../wasm/rasterContourClient';
 
 const projectPointDepth = (
     projectionCache: MeshProjectionCache,
@@ -156,6 +157,29 @@ const applyGlobalDepthVisibility = (
     });
 };
 
+const buildWasmRasterInputs = (preparedParts: Array<{
+    part: ProjectionPartSource;
+    projectionCache: MeshProjectionCache;
+    fallbackDepth: number;
+}>) => preparedParts.map((prepared) => {
+    const triangleData = new Float32Array(prepared.part.triangles.length * 12);
+    let offset = 0;
+    prepared.part.triangles.forEach((triangle) => {
+        triangle.vertexIndices.forEach((vertexIndex) => {
+            triangleData[offset] = prepared.projectionCache.screenX[vertexIndex];
+            triangleData[offset + 1] = prepared.projectionCache.screenY[vertexIndex];
+            triangleData[offset + 2] = prepared.projectionCache.depth[vertexIndex];
+            triangleData[offset + 3] = 0;
+            offset += 4;
+        });
+    });
+    return {
+        part: prepared.part,
+        triangleData,
+        fallbackDepth: prepared.fallbackDepth,
+    };
+});
+
 export const shapeProjectedParts = async (
     parts: ProjectionPartSource[],
     state: ProjectionMaskState | null,
@@ -180,7 +204,8 @@ export const shapeProjectedParts = async (
         };
     }
 
-    const rasterizer = getGpuPartRasterizer();
+    const requestedBackend = settings.cpuRasterBackend ?? 'ts';
+    const wasmClient = getRasterContourClient();
     const prepareStart = performance.now();
     const preparedParts = filteredParts
         .flatMap((part) => {
@@ -210,10 +235,27 @@ export const shapeProjectedParts = async (
     const prepareMs = performance.now() - prepareStart;
 
     const rasterStart = performance.now();
-    const rasterResults = await rasterizer.rasterizeBatch(preparedParts);
+    let rasterResults: Array<RasterizedPartData | null>;
+    let depthAtlas: GpuDepthAtlasState | null;
+    if (requestedBackend !== 'ts') {
+        const wasmResult = await wasmClient.runBatch(
+            frame.width,
+            frame.height,
+            buildWasmRasterInputs(preparedParts),
+        );
+        if (!wasmResult) {
+            return null;
+        }
+        rasterResults = wasmResult.parts;
+        const rasterizer = getGpuPartRasterizer();
+        depthAtlas = await rasterizer.uploadDepthAtlasFromRasterData(rasterResults);
+    } else {
+        const rasterizer = getGpuPartRasterizer();
+        rasterResults = await rasterizer.rasterizeBatch(preparedParts);
+        applyGlobalDepthVisibility(rasterResults, frame.width, frame.height);
+        depthAtlas = rasterizer.getDepthAtlasState();
+    }
     const rasterMs = performance.now() - rasterStart;
-    applyGlobalDepthVisibility(rasterResults, frame.width, frame.height);
-    const depthAtlas = rasterizer.getDepthAtlasState();
 
     let buildSharedChainsMs = 0;
     let extractLoopsMs = 0;

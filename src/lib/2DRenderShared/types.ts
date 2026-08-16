@@ -33,6 +33,34 @@ export type ProjectionOverlaySettings = {
     focusShapeBudgets: Record<Exclude<FocusLevel, 'auto'>, number>;
     mergeColorThreshold: number;
     partOverrides: Record<string, ProjectionPartStyleOverride>;
+    /** CPU raster/contour backend. Omitted by older persisted settings and treated as TS. */
+    cpuRasterBackend?: CpuRasterBackend;
+};
+
+export type CpuRasterBackend = 'auto' | 'wasm' | 'ts';
+
+export type WasmRasterStatus =
+    | 'idle'
+    | 'loading'
+    | 'ready'
+    | 'running'
+    | 'failed'
+    | 'timed-out'
+    | 'disabled';
+
+export type WasmRasterSnapshot = {
+    status: WasmRasterStatus;
+    initMs: number;
+    lastError: string | null;
+    lastBatch?: {
+        totalMs: number;
+        wasmCallMs: number;
+        outputCopyMs: number;
+        partCount: number;
+        triangleCount: number;
+        loopCount: number;
+        outputBytes: number;
+    };
 };
 
 export type PaintLayerKind = 'shadow' | 'base' | 'highlight';

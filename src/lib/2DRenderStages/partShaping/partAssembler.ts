@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import type { GpuRasterizedPartData } from '../partRasterization/rasterizer';
+import type { RasterizedPartData } from '../partRasterization/rasterizer';
 import type { ProjectionPartSource } from '../../modelParts';
 import { polygonArea } from '../../2DRenderShared/geometry';
 import type {
@@ -19,7 +19,7 @@ export const buildProjectedPartShapeFromRasterData = (
     state: ProjectionMaskState,
     projectionCache: MeshProjectionCache,
     settings: ProjectionOverlaySettings,
-    rasterData: GpuRasterizedPartData,
+    rasterData: RasterizedPartData,
 ) => {
     const modeDefaults = getStyleModeDefaults(settings.styleMode);
     const simplifyMultiplier = settings.enableComposition ? part.simplifyMultiplier ?? 1 : 1;
@@ -40,13 +40,13 @@ export const buildProjectedPartShapeFromRasterData = (
     const buildSharedChainsMs = performance.now() - sharedChainsStart;
 
     const extractLoopsStart = performance.now();
-    const extractedLoops = extractLoopsFromMask(
-        rasterData.occupied,
-        rasterData.width,
-        rasterData.height,
-        rasterData.offsetX,
-        rasterData.offsetY,
-    );
+    const extractedLoops = rasterData.loops ?? extractLoopsFromMask(
+            rasterData.occupied,
+            rasterData.width,
+            rasterData.height,
+            rasterData.offsetX,
+            rasterData.offsetY,
+        );
     const extractLoopsMs = performance.now() - extractLoopsStart;
 
     const simplifyLoopsStart = performance.now();

@@ -47,3 +47,15 @@ models/vmd/Aerial.vmd
 ```
 
 The 2D view requires WebGPU. Unsupported browsers keep the Three.js viewport visible and show a capability message in the result pane.
+
+## Video Export
+
+The left control panel starts with an expandable `Export Video` section. It can export the current animation frame-by-frame as:
+
+- the 2D result;
+- the 3D viewport; or
+- a side-by-side 3D + 2D video.
+
+The export range, frame step, FPS, and output scale are configurable. When WebCodecs is available, each sampled frame is encoded with an explicit timestamp, so the output duration is exactly `sampled frame count / FPS`; expensive projection work does not stretch playback time. Export temporarily pauses playback, waits for the projection pipeline to finish each selected frame, and restores the previous animation time and playback state when it completes or is cancelled.
+
+WebCodecs produces WebM/MP4 with a higher default bitrate and deterministic timestamps. Older browsers fall back to `MediaRecorder`; that path is real-time and can take longer when a frame is expensive to calculate. Browsers without either encoder show export as unavailable.

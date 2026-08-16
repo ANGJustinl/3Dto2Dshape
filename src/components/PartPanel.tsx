@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { MaterialDebugInfo, PartNode } from '../lib/modelParts';
-import type { FocusLevel, ProjectionOverlaySettings } from '../lib/2DRenderShared/types';
+import type { FocusLevel, ProjectionOverlaySettings, WasmRasterSnapshot } from '../lib/2DRenderShared/types';
+import { getRasterContourClient } from '../lib/wasm/rasterContourClient';
+import ExportPanel from './ExportPanel';
+import type { ExportVideoSettings } from '../lib/export/videoExporter';
 
 type PartPanelProps = {
   parts: PartNode[];
@@ -20,6 +23,13 @@ type PartPanelProps = {
   onFrameStrideChange: (value: number) => void;
   onSelect: (partId: string | null) => void;
   onProjectionSettingsChange: (settings: ProjectionOverlaySettings) => void;
+  wasmSnapshot: WasmRasterSnapshot;
+  animationFrameCount: number;
+  onExportVideo: (
+    settings: ExportVideoSettings,
+    onProgress: (completed: number, total: number) => void,
+    signal: AbortSignal,
+  ) => Promise<void>;
 };
 
 type VisiblePartRow = {
@@ -123,6 +133,9 @@ function PartPanel({
   onFrameStrideChange,
   onSelect,
   onProjectionSettingsChange,
+  wasmSnapshot,
+  animationFrameCount,
+  onExportVideo,
 }: PartPanelProps) {
   const [collapsedPaths, setCollapsedPaths] = useState<Set<string>>(() => collectParentPaths(parts));
   const [scrollTop, setScrollTop] = useState(0);
@@ -206,6 +219,10 @@ function PartPanel({
 
   return (
     <aside className="part-panel">
+      <ExportPanel
+        animationFrameCount={animationFrameCount}
+        onExportVideo={onExportVideo}
+      />
       <div className="projection-controls">
         <label className="projection-select">
           <span>Style Mode</span>
@@ -558,6 +575,60 @@ function PartPanel({
         </label>
         <details className="projection-advanced">
           <summary>Advanced / Experimental</summary>
+          <label className="projection-select">
+            <span>CPU Raster Backend</span>
+            <select
+              value={projectionSettings.cpuRasterBackend ?? 'ts'}
+              onChange={(event) =>
+                onProjectionSettingsChange({
+                  ...projectionSettings,
+                  cpuRasterBackend: event.currentTarget.value as ProjectionOverlaySettings['cpuRasterBackend'],
+                })
+              }
+            >
+              <option value="auto">Auto (WASM)</option>
+              <option value="wasm">WASM</option>
+              <option value="ts">TypeScript / GPU</option>
+            </select>
+          </label>
+          <div className="wasm-status-panel">
+            <div>Selected backend: {projectionSettings.cpuRasterBackend ?? 'ts'}</div>
+            <div>WASM: {wasmSnapshot.status}</div>
+            <div>Init: {wasmSnapshot.initMs.toFixed(0)} ms</div>
+            {wasmSnapshot.lastBatch ? (
+              <>
+                <div>Batch: {wasmSnapshot.lastBatch.totalMs.toFixed(1)} ms</div>
+                <div>WASM call: {wasmSnapshot.lastBatch.wasmCallMs.toFixed(1)} ms</div>
+                <div>
+                  Parts/Triangles/Loops: {wasmSnapshot.lastBatch.partCount}/
+                  {wasmSnapshot.lastBatch.triangleCount}/{wasmSnapshot.lastBatch.loopCount}
+                </div>
+              </>
+            ) : null}
+            {wasmSnapshot.lastError ? <div>{wasmSnapshot.lastError}</div> : null}
+            {(wasmSnapshot.status === 'failed' || wasmSnapshot.status === 'timed-out') ? (
+              <div className="projection-button-row wasm-actions">
+                <button
+                  type="button"
+                  className="part-chip"
+                  onClick={() =>
+                    onProjectionSettingsChange({ ...projectionSettings, cpuRasterBackend: 'ts' })
+                  }
+                >
+                  Use TypeScript
+                </button>
+                <button
+                  type="button"
+                  className="part-chip"
+                  onClick={() => {
+                    void getRasterContourClient().initialize(true);
+                  }}
+                >
+                  Retry WASM
+                </button>
+              </div>
+            ) : null}
+          </div>
           <label className="projection-check">
             <input
               type="checkbox"
