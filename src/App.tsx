@@ -20,7 +20,12 @@ import {
     type ProjectionOverlaySettings,
 } from './lib/2DRenderShared/types';
 import { createProjectionMaskState } from './lib/2DRenderShared/maskState';
+import { getStyleModeDefaults } from './lib/2DRenderShared/focusResolver';
 import { getWebGpuScreenProjector } from './lib/2DRenderStages/meshProjection/projector';
+import { compose2DRenderOverlay } from './lib/2DRenderStages/composition';
+import { filterSmallProjectedPartShapes } from './lib/2DRenderStages/partFiltering';
+import { shapeProjectedParts } from './lib/2DRenderStages/partShaping';
+import { composeProjectedShapes } from './lib/2DRenderStages/partShaping/shapeComposition';
 import { getSharedWebGpuContext } from './lib/webgpuShared';
 import { getRasterContourClient } from './lib/wasm/rasterContourClient';
 import {
@@ -28,6 +33,9 @@ import {
     type ExportFrameCanvases,
     type ExportVideoSettings,
 } from './lib/export/videoExporter';
+import { buildLive2dModel, type IsolatedRenderResult } from './lib/live2d/build';
+import { summarizeBake, type BakeSummary } from './lib/live2d/bakeSummary';
+import type { Live2dModel } from './lib/live2d/model';
 
 type MaterialState = {
     visible: boolean;
@@ -363,6 +371,11 @@ function App() {
     const currentAnimationDurationRef = useRef(0);
     const setAnimationTimeRef = useRef<((timeSeconds: number) => void) | null>(null);
     const exportFrameRef = useRef<ExportFrameProvider | null>(null);
+    const buildLive2dRef = useRef<
+        ((
+            onProgress: (stage: 'samples' | 'textures', done: number, total: number, detail: string) => void,
+        ) => Promise<{ model: Live2dModel; summary: BakeSummary }>) | null
+    >(null);
     const [parts, setParts] = useState<PartNode[]>([]);
     const [debugMaterials, setDebugMaterials] = useState<MaterialDebugInfo[]>([]);
     const [selectedPartId, setSelectedPartId] = useState<string | null>(null);
@@ -375,6 +388,7 @@ function App() {
     const [animationFrameCount, setAnimationFrameCount] = useState(1);
     const [frameStride, setFrameStride] = useState(2);
     const [isPlaybackPaused, setIsPlaybackPaused] = useState(false);
+    const [live2dModel, setLive2dModel] = useState<Live2dModel | null>(null);
     const [gpuStatus, setGpuStatus] = useState<GpuStatus>('checking');
     const [assetStatus, setAssetStatus] = useState<AssetStatus>('loading-model');
     const [wasmSnapshot, setWasmSnapshot] = useState(() => getRasterContourClient().getSnapshot());
@@ -1048,10 +1062,183 @@ function App() {
         renderer.domElement.addEventListener('contextmenu', onContextMenu);
         animate();
 
+        // Live2D build (M1-M3): face bake + isolated texture renders while
+        // playback is paused. renderIsolated renders only the given leaves to
+        // an offscreen target with the bake camera; the animate loop cannot
+        // interleave because each call is synchronous.
+        buildLive2dRef.current = async (onProgress) => {
+            const root = modelRef.current;
+            const bakeParts = projectionPartsRef.current;
+            const maskState = projectionMaskStateRef.current;
+            if (!root || bakeParts.length === 0 || !maskState) {
+                throw new Error('Model segmentation is not ready yet.');
+            }
+
+            // 3渲2 texture source: run the stylized 2D pipeline per drawable
+            // (paint layers + contours, matching the right-hand 2D view) on a
+            // transparent background. One shared neutral projection frame
+            // serves every drawable; falls back to the raw 3D isolated render
+            // when the 2D pipeline is unavailable.
+            let neutralFrame: Awaited<ReturnType<typeof webGpuProjector.getFrame>> = null;
+            const TEXTURE_FRAME_ID_BASE = 2_000_000;
+            const renderDrawable2D = async (
+                leafIds: string[],
+                isoCamera: THREE.PerspectiveCamera,
+                viewport: { width: number; height: number },
+            ): Promise<IsolatedRenderResult | null> => {
+                try {
+                    if (!neutralFrame) {
+                        webGpuProjector.requestFrame(bakeParts, isoCamera, viewport.width, viewport.height, TEXTURE_FRAME_ID_BASE);
+                        const ready = await webGpuProjector.waitForFrame(TEXTURE_FRAME_ID_BASE);
+                        if (!ready) {
+                            return null;
+                        }
+                        neutralFrame = webGpuProjector.getFrame(TEXTURE_FRAME_ID_BASE);
+                        if (!neutralFrame) {
+                            return null;
+                        }
+                    }
+
+                    const settings = { ...projectionSettingsRef.current };
+                    const shaped = await shapeProjectedParts(
+                        bakeParts,
+                        maskState,
+                        settings,
+                        new Set(leafIds),
+                        neutralFrame,
+                    );
+                    if (!shaped || shaped.shapes.length === 0) {
+                        return null;
+                    }
+
+                    const composedShapes = settings.enableComposition
+                        ? composeProjectedShapes(
+                              shaped.shapes,
+                              maskState.sharedChains,
+                              settings,
+                              viewport.width,
+                              viewport.height,
+                          )
+                        : shaped.shapes;
+                    const modeDefaults = getStyleModeDefaults(settings.styleMode);
+                    const filteredShapes = filterSmallProjectedPartShapes(
+                        composedShapes,
+                        settings.minShapeArea * modeDefaults.minShapeAreaScale,
+                        settings.enableComposition ? { focal: 0.05, support: 1, abstract: 1.65 } : {},
+                        settings.enableComposition,
+                    );
+                    if (filteredShapes.length === 0) {
+                        return null;
+                    }
+
+                    const offscreen = document.createElement('canvas');
+                    const composed = await compose2DRenderOverlay(
+                        offscreen,
+                        filteredShapes,
+                        viewport.width,
+                        viewport.height,
+                        settings,
+                        shaped.depthAtlas,
+                        { transparent: true },
+                    );
+                    if (!composed) {
+                        return null;
+                    }
+
+                    // Read back at viewport scale and flip to bottom-up rows,
+                    // matching the raw renderIsolated contract.
+                    const readCanvas = document.createElement('canvas');
+                    readCanvas.width = viewport.width;
+                    readCanvas.height = viewport.height;
+                    const context = readCanvas.getContext('2d');
+                    if (!context) {
+                        return null;
+                    }
+                    context.drawImage(offscreen, 0, 0, viewport.width, viewport.height);
+                    const data = context.getImageData(0, 0, viewport.width, viewport.height).data;
+                    const rgba = new Uint8Array(data.length);
+                    const rowBytes = viewport.width * 4;
+                    for (let row = 0; row < viewport.height; row += 1) {
+                        const sourceRow = viewport.height - 1 - row;
+                        rgba.set(data.subarray(sourceRow * rowBytes, sourceRow * rowBytes + rowBytes), row * rowBytes);
+                    }
+                    return { rgba, width: viewport.width, height: viewport.height };
+                } catch (error) {
+                    console.warn('2D pipeline texture render failed, falling back to raw render.', error);
+                    return null;
+                }
+            };
+
+            const renderIsolated = (
+                leafIds: string[],
+                isoCamera: THREE.PerspectiveCamera,
+                viewport: { width: number; height: number },
+            ): IsolatedRenderResult => {
+                const leafIdSet = new Set(leafIds);
+                const renderTarget = new THREE.WebGLRenderTarget(viewport.width, viewport.height, {
+                    depthBuffer: true,
+                    stencilBuffer: false,
+                });
+                const materialVisibility = new Map<THREE.Material, boolean>();
+                leafMaterialMapRef.current.forEach((material, leafId) => {
+                    materialVisibility.set(material, material.visible);
+                    material.visible = leafIdSet.has(leafId);
+                });
+                const previousBackground = scene.background;
+                const previousClearAlpha = renderer.getClearAlpha();
+                scene.background = null;
+                renderer.setRenderTarget(renderTarget);
+                renderer.setClearColor(0x000000, 0);
+                renderer.clear();
+                renderer.render(scene, isoCamera);
+                const rgba = new Uint8Array(viewport.width * viewport.height * 4);
+                renderer.readRenderTargetPixels(renderTarget, 0, 0, viewport.width, viewport.height, rgba);
+                renderer.setRenderTarget(null);
+                scene.background = previousBackground;
+                renderer.setClearAlpha(previousClearAlpha);
+                materialVisibility.forEach((visible, material) => {
+                    material.visible = visible;
+                });
+                renderTarget.dispose();
+                return { rgba, width: viewport.width, height: viewport.height };
+            };
+
+            const previousPaused = playbackPausedRef.current;
+            playbackPausedRef.current = true;
+            setIsPlaybackPaused(true);
+            forceProjectionRefreshRef.current = false;
+            forceNewProjectionFrameRef.current = false;
+            try {
+                const { model: builtModel, bundle } = await buildLive2dModel({
+                    root,
+                    parts: bakeParts,
+                    camera,
+                    projector: webGpuProjector,
+                    modelName: 'Corin',
+                    renderDrawable2D,
+                    renderIsolated,
+                    onProgress,
+                });
+                console.log('Live2D model built.', {
+                    drawables: builtModel.drawables.length,
+                    order: builtModel.order,
+                    errorReport: builtModel.errorReport,
+                    orderFlips: builtModel.orderReport.flips.length,
+                });
+                return { model: builtModel, summary: summarizeBake(bundle) };
+            } finally {
+                playbackPausedRef.current = previousPaused;
+                setIsPlaybackPaused(previousPaused);
+                forceProjectionRefreshRef.current = true;
+                forceNewProjectionFrameRef.current = true;
+            }
+        };
+
         return () => {
             disposed = true;
             setAnimationTimeRef.current = null;
             exportFrameRef.current = null;
+            buildLive2dRef.current = null;
             if (segmentationTimer !== null) {
                 window.clearTimeout(segmentationTimer);
             }
@@ -1100,6 +1287,18 @@ function App() {
         }
     };
 
+    const handleBuildLive2d = async (
+        onProgress: (stage: 'samples' | 'textures', done: number, total: number, detail: string) => void,
+    ): Promise<BakeSummary> => {
+        const runner = buildLive2dRef.current;
+        if (!runner) {
+            throw new Error('The scene is not ready for building.');
+        }
+        const { model, summary } = await runner(onProgress);
+        setLive2dModel(model);
+        return summary;
+    };
+
     const baseRuntimeStatus: RuntimeStatus = gpuStatus === 'ready' ? assetStatus : gpuStatus;
     const requestedCpuBackend = projectionSettings.cpuRasterBackend ?? 'ts';
     const runtimeStatus: RuntimeStatus =
@@ -1134,6 +1333,9 @@ function App() {
                 wasmSnapshot={wasmSnapshot}
                 animationFrameCount={animationFrameCount}
                 onExportVideo={handleExportVideo}
+                onBuildLive2d={handleBuildLive2d}
+                live2dModel={live2dModel}
+                onImportLive2dModel={setLive2dModel}
             />
             <div className="viewport-pane">
                 <div ref={mountRef} className="viewport" />

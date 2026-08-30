@@ -174,6 +174,7 @@ export class GpuOverlayComposer {
         viewportHeight: number,
         settings: ProjectionOverlaySettings,
         depthAtlas: GpuDepthAtlasState | null,
+        options?: { transparent?: boolean },
     ) {
         const totalStart = performance.now();
         if (viewportWidth <= 0 || viewportHeight <= 0) {
@@ -186,7 +187,7 @@ export class GpuOverlayComposer {
             .filter((shape): shape is PreparedShape => shape !== null);
         const prepareMs = performance.now() - prepareStart;
         if (preparedShapes.length === 0 || !depthAtlas) {
-            await this.clear(canvas, viewportWidth, viewportHeight);
+            await this.clear(canvas, viewportWidth, viewportHeight, settings, options?.transparent);
             return false;
         }
 
@@ -201,7 +202,7 @@ export class GpuOverlayComposer {
         this.configureCanvas(canvas, device, viewportWidth, viewportHeight);
         this.ensureDepthTexture(device, canvas.width, canvas.height);
         this.ensurePipelines(device);
-        const background = hexToRgba(settings.backgroundColor, 1);
+        const background = hexToRgba(settings.backgroundColor, options?.transparent ? 0 : 1);
 
         const resourceStart = performance.now();
         const resources = preparedShapes.map((shape) =>
@@ -287,17 +288,18 @@ export class GpuOverlayComposer {
         viewportWidth: number,
         viewportHeight: number,
         settings?: ProjectionOverlaySettings,
+        transparent?: boolean,
     ) {
         if (viewportWidth <= 0 || viewportHeight <= 0) {
             return;
         }
 
         const device = await this.getDevice();
-        const background = hexToRgba(settings?.backgroundColor ?? '#FFFDF8', 1);
+        const background = hexToRgba(settings?.backgroundColor ?? '#FFFDF8', transparent ? 0 : 1);
         if (!device) {
             const context = canvas.getContext('2d');
             context?.setTransform(1, 0, 0, 1, 0, 0);
-            if (context) {
+            if (context && !transparent) {
                 context.fillStyle = settings?.backgroundColor ?? '#FFFDF8';
                 context.fillRect(0, 0, canvas.width, canvas.height);
             }
@@ -331,9 +333,7 @@ export class GpuOverlayComposer {
             this.devicePromise = getSharedWebGpuContext().getDevice();
         }
         return this.devicePromise;
-    }
-
-    private configureCanvas(
+    }    private configureCanvas(
         canvas: HTMLCanvasElement,
         device: GPUDeviceLike,
         viewportWidth: number,
@@ -353,6 +353,10 @@ export class GpuOverlayComposer {
         if (!this.canvas || this.canvas !== canvas) {
             this.canvas = canvas;
             this.context = canvas.getContext('webgpu') as GPUCanvasContextLike | null;
+            // A fresh context must be configured even when the preferred
+            // format is unchanged, otherwise getCurrentTexture() renders
+            // nothing on the swapped canvas.
+            this.format = null;
         }
 
         if (!this.context) {

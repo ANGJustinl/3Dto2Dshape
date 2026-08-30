@@ -362,3 +362,37 @@ canvas {
     border: 1px solid rgba(24, 21, 18, 0.1);
     word-break: break-word;
 }
+
+.live2d-preview-canvas {
+    width: 100%;
+    aspect-ratio: 1 / 1;
+    background: #23201d;
+    border-radius: 10px;
+    display: block;
+}
+
+.live2d-param {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    align-items: center;
+    gap: 4px;
+    font-size: 12px;
+}
+
+.live2d-param input[type='range'] {
+    grid-column: 1 / -1;
+    width: 100%;
+}
+
+.live2d-import-label {
+    position: relative;
+    overflow: hidden;
+    cursor: pointer;
+}
+
+.live2d-import-label input {
+    position: absolute;
+    inset: 0;
+    opacity: 0;
+    cursor: pointer;
+}

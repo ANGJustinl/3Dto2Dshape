@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>VTS API Client</title></head>
+<body>
+<pre id="log" style="white-space:pre-wrap"></pre>
+<script>
+const logEl = document.getElementById('log');
+const log = (m) => { logEl.textContent += m + '\n'; };
+window.vts = {
+  connect() {
+    const ws = new WebSocket('ws://localhost:8001');
+    window.ws = ws;
+    ws.onopen = () => log('CONNECTED');
+    ws.onmessage = (e) => log('<< ' + e.data.slice(0, 300));
+    ws.onclose = () => log('CLOSED');
+    ws.onerror = () => log('ERROR');
+  },
+  auth(pluginName) {
+    window.ws.send(JSON.stringify({ apiName: 'AuthenticationTokenRequest', data: { pluginName, pluginDeveloper: '3Dto2Dshape-dev' } }));
+  },
+  loadModel(name) {
+    const msg = { apiName: 'ModelLoadRequest', data: { authenticationToken: window.token, model: name } };
+    window.ws.send(JSON.stringify(msg));
+  },
+  drive(values, ms) {
+    const t0 = Date.now();
+    const iv = setInterval(() => {
+      if (Date.now() - t0 > ms) { clearInterval(iv); log('drive done'); return; }
+      window.ws.send(JSON.stringify({ apiName: 'InjectParameterData', data: {
+        authenticationToken: window.token,
+        parameterValues: Object.entries(values).map(([id, value]) => ({ id, value })),
+        mode: 'set' } }));
+    }, 33);
+  },
+};
+</script></body></html>

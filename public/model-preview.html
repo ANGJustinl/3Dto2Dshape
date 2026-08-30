@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Corin — Web Core preview</title>
+<style>
+  body { margin: 0; background: #202030; color: #ddd; font: 13px/1.4 monospace; display: flex; }
+  #side { padding: 10px; width: 250px; }
+  #gl { background: #303048; }
+  button { display: block; margin: 4px 0; width: 100%; text-align: left; }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<canvas id="gl" width="760" height="760"></canvas>
+<div id="side">
+  <div id="status">loading…</div>
+  <button data-pose="neutral">neutral</button>
+  <button data-pose="x30">AngleX=30</button>
+  <button data-pose="xm30">AngleX=-30</button>
+  <button data-pose="y30">AngleY=30</button>
+  <button data-pose="z30">AngleZ=30</button>
+  <button data-pose="zm30">AngleZ=-30</button>
+  <button data-pose="mouth">MouthOpenY=1</button>
+  <button data-pose="eyesclosed">Eyes closed</button>
+  <button data-pose="idle">idle-like (VTS values)</button>
+  <div>Web Core: <span id="ver"></span></div>
+  <div>统一坐标: moc3 原始像素 / ppu 归一化到画面</div>
+</div>
+<script src="/preview/live2dcubismcore.min.js"></script>
+<script>
+const canvas = document.getElementById('gl');
+const gl = canvas.getContext('webgl', { alpha: true, premultipliedAlpha: true });
+
+const VS = `
+attribute vec2 a_pos;
+attribute vec2 a_uv;
+uniform vec2 u_scale;
+varying vec2 v_uv;
+void main() {
+  gl_Position = vec4(a_pos * u_scale, 0.0, 1.0);
+  v_uv = a_uv;
+}`;
+const FS = `
+precision mediump float;
+varying vec2 v_uv;
+uniform sampler2D u_tex;
+uniform float u_opacity;
+void main() {
+  vec4 c = texture2D(u_tex, vec2(v_uv.x, 1.0 - v_uv.y));
+  gl_FragColor = vec4(c.rgb * c.a * u_opacity, c.a * u_opacity);
+}`;
+
+function shader(type, src) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src);
+  gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw gl.getShaderInfoLog(s);
+  return s;
+}
+const prog = gl.createProgram();
+gl.attachShader(prog, shader(gl.VERTEX_SHADER, VS));
+gl.attachShader(prog, shader(gl.FRAGMENT_SHADER, FS));
+gl.linkProgram(prog);
+gl.useProgram(prog);
+const aPos = gl.getAttribLocation(prog, 'a_pos');
+const aUv = gl.getAttribLocation(prog, 'a_uv');
+const uScale = gl.getUniformLocation(prog, 'u_scale');
+const uOpacity = gl.getUniformLocation(prog, 'u_opacity');
+const uTex = gl.getUniformLocation(prog, 'u_tex');
+gl.uniform1i(uTex, 0);
+gl.enable(gl.BLEND);
+gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+gl.disable(gl.DEPTH_TEST);
+gl.disable(gl.CULL_FACE);
+
+const POSES = {
+  neutral: {},
+  x30: { ParamAngleX: 30 },
+  xm30: { ParamAngleX: -30 },
+  y30: { ParamAngleY: 30 },
+  z30: { ParamAngleZ: 30 },
+  zm30: { ParamAngleZ: -30 },
+  mouth: { ParamMouthOpenY: 1 },
+  eyesclosed: { ParamEyeLOpen: 0, ParamEyeROpen: 0 },
+  idle: { ParamAngleX: 2.5, ParamAngleY: -1.5, ParamAngleZ: 0.8, ParamEyeLOpen: 1.9, ParamEyeROpen: 1.9, ParamMouthOpenY: 2.1 },
+};
+
+async function main() {
+  document.getElementById('ver').textContent = Live2DCubismCore.Version.toCSVersion ? Live2DCubismCore.Version.toCSVersion(Live2DCubismCore.Version.csmGetVersion()) : Live2DCubismCore.Version.csmGetVersion();
+
+  const mocBuf = await (await fetch('/preview/model.moc3')).arrayBuffer();
+  const moc = Live2DCubismCore.Moc.fromArrayBuffer(mocBuf);
+  if (!moc) { document.getElementById('status').textContent = 'Moc parse FAILED'; return; }
+  const model = Live2DCubismCore.Model.fromMoc(moc);
+  document.getElementById('status').textContent = 'moc ok, model ok';
+
+  const img = new Image();
+  img.src = '/preview/texture_00.png';
+  await img.decode();
+  const tex = gl.createTexture();
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+  const ids = Array.from(model.parameters.ids).map(String);
+  const values = model.parameters.values;
+  const defPtr = model.parameters.defaultValues;
+  const defaults = Array.from(model.parameters.defaultValues);
+
+  window.setPose = (pose) => {
+    ids.forEach((id, i) => {
+      const v = pose[id] !== undefined ? pose[id] : (defaults[i] !== undefined ? defaults[i] : 0);
+      values[i] = v;
+    });
+    // eyes default to open per the model defaults; force explicit defaults
+    model.update();
+    draw();
+    return 'ok';
+  };
+  window.core = { model, ids };
+
+  const d = model.drawables;
+  const draw = () => {
+    gl.viewport(0, 0, canvas.width, canvas.height);
+    gl.clearColor(0.18, 0.18, 0.28, 1);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.useProgram(prog);
+    gl.uniform2f(uScale, 2 / 1024, 2 / 1024); // canvas 1024 px mapped to clip
+    const order = Array.from(d.renderOrders).map((r, i) => [r, i]).sort((a, b) => a[0] - b[0]);
+    for (const [, i] of order) {
+      const vc = d.vertexCounts[i];
+      const ic = d.indexCounts[i];
+      const pos = d.vertexPositions[i];
+      const uv = d.vertexUvs[i];
+      const idx = d.indices[i];
+      gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
+      gl.bufferData(gl.ARRAY_BUFFER, pos, gl.DYNAMIC_DRAW);
+      gl.enableVertexAttribArray(aPos);
+      gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+      gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
+      gl.bufferData(gl.ARRAY_BUFFER, uv, gl.DYNAMIC_DRAW);
+      gl.enableVertexAttribArray(aUv);
+      gl.vertexAttribPointer(aUv, 2, gl.FLOAT, false, 0, 0);
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, gl.createBuffer());
+      gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, idx, gl.STATIC_DRAW);
+      gl.uniform1f(uOpacity, d.opacities[i]);
+      gl.drawElements(gl.TRIANGLES, ic, gl.UNSIGNED_SHORT, 0);
+    }
+  };
+
+  draw();
+  document.getElementById('status').textContent = 'ready — drawables: ' + d.count;
+  document.querySelectorAll('button').forEach((b) => {
+    b.onclick = () => { setPose(POSES[b.dataset.pose]); };
+  });
+}
+main();
+</script>
+</body>
+</html>

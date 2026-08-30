@@ -3,7 +3,11 @@ import type { MaterialDebugInfo, PartNode } from '../lib/modelParts';
 import type { FocusLevel, ProjectionOverlaySettings, WasmRasterSnapshot } from '../lib/2DRenderShared/types';
 import { getRasterContourClient } from '../lib/wasm/rasterContourClient';
 import ExportPanel from './ExportPanel';
+import Live2dBakePanel from './Live2dBakePanel';
+import Live2DPreviewPanel from './Live2DPreviewPanel';
 import type { ExportVideoSettings } from '../lib/export/videoExporter';
+import type { BakeSummary } from '../lib/live2d/bakeSummary';
+import type { Live2dModel } from '../lib/live2d/model';
 
 type PartPanelProps = {
   parts: PartNode[];
@@ -30,6 +34,11 @@ type PartPanelProps = {
     onProgress: (completed: number, total: number) => void,
     signal: AbortSignal,
   ) => Promise<void>;
+  onBuildLive2d: (
+    onProgress: (stage: 'samples' | 'textures', done: number, total: number, detail: string) => void,
+  ) => Promise<BakeSummary>;
+  live2dModel: Live2dModel | null;
+  onImportLive2dModel: (model: Live2dModel) => void;
 };
 
 type VisiblePartRow = {
@@ -136,6 +145,9 @@ function PartPanel({
   wasmSnapshot,
   animationFrameCount,
   onExportVideo,
+  onBuildLive2d,
+  live2dModel,
+  onImportLive2dModel,
 }: PartPanelProps) {
   const [collapsedPaths, setCollapsedPaths] = useState<Set<string>>(() => collectParentPaths(parts));
   const [scrollTop, setScrollTop] = useState(0);
@@ -223,6 +235,10 @@ function PartPanel({
         animationFrameCount={animationFrameCount}
         onExportVideo={onExportVideo}
       />
+      <Live2dBakePanel onBuildLive2d={onBuildLive2d} />
+      {live2dModel ? (
+        <Live2DPreviewPanel model={live2dModel} onImportModel={onImportLive2dModel} />
+      ) : null}
       <div className="projection-controls">
         <label className="projection-select">
           <span>Style Mode</span>

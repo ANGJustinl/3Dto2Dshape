@@ -18,13 +18,15 @@ export const compose2DRenderOverlay = async (
     viewportHeight: number,
     settings: ProjectionOverlaySettings,
     depthAtlas: GpuDepthAtlasState | null,
+    options?: { transparent?: boolean },
 ) => {
-    await getGpuOverlayComposer().render(
+    return await getGpuOverlayComposer().render(
         canvas,
         shapes,
         viewportWidth,
         viewportHeight,
         settings,
         depthAtlas,
+        options,
     );
 };
