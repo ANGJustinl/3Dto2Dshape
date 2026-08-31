@@ -16,6 +16,7 @@ import type { Live2dDrawable, Live2dModel, Live2dTexture } from './model';
 import { computeDrawOrder, checkOrderConsistency, medianDepth } from './order';
 import { computePoseDrawOrders } from './occlusionOrder';
 import { frameGeometryToViewport } from './framing';
+import { stabilizeHeadAngleKeyforms } from './headStabilization';
 import type { ProjectionPartSource } from '../modelParts';
 import type { BakeBundle } from './types';
 
@@ -94,7 +95,7 @@ const cropTopDown = (
 };
 
 /** Bumped with every pipeline behavior change so stale bakes are detectable. */
-export const PIPELINE_VERSION = '2026-08-31.1';
+export const PIPELINE_VERSION = '2026-09-01.1';
 
 /**
  * Mouth-interior parts (teeth, tongue) clip to the lip-line drawable, the
@@ -212,6 +213,11 @@ export const buildLive2dModel = async (options: BuildOptions): Promise<{
     const rawFamilies = buildFamilyKeyforms(bundle, drawables);
     const depthFamilies = buildDepthKeyforms(bundle, drawables);
     const rawNeutralPositions = drawables.map((drawable) => drawableNeutralPositions(drawable, neutral));
+    const stabilizedFamilies = stabilizeHeadAngleKeyforms(
+        drawables,
+        rawNeutralPositions,
+        rawFamilies,
+    );
     const neutralMedians = drawables.map((drawable) => medianDepth(drawable, neutral));
     const orderIds = computeDrawOrder(drawables, neutral);
     const poseDrawOrders = computePoseDrawOrders(
@@ -225,10 +231,10 @@ export const buildLive2dModel = async (options: BuildOptions): Promise<{
     );
     const orderIndexById = new Map(orderIds.map((id, index) => [id, index]));
 
-    const evaluator = createPoseEvaluator(drawables, rawNeutralPositions, rawFamilies);
+    const evaluator = createPoseEvaluator(drawables, rawNeutralPositions, stabilizedFamilies);
     const errorReport = evaluateComboError(bundle, drawables, evaluator);
     const orderReport = checkOrderConsistency(bundle, drawables, orderIds);
-    const framedGeometry = frameGeometryToViewport(rawNeutralPositions, rawFamilies, viewport);
+    const framedGeometry = frameGeometryToViewport(rawNeutralPositions, stabilizedFamilies, viewport);
 
     const live2dDrawables: Live2dDrawable[] = drawables.map((drawable, drawableIndex) => {
         const baked = bakedTextures.get(drawable.id);
