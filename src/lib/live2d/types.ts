@@ -27,6 +27,8 @@ export type FaceParamSource =
           axis: ParamAxis;
           /** Sign is tuned against the Live2D convention at the runtime milestone. */
           sign: 1 | -1;
+          /** Live2D parameter units need not equal physical bone degrees. */
+          rotationScale?: number;
       }
     | {
           kind: 'morph';

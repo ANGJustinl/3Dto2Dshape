@@ -15,6 +15,7 @@ import { buildFamilyKeyforms, buildDepthKeyforms, createPoseEvaluator, evaluateC
 import type { Live2dDrawable, Live2dModel, Live2dTexture } from './model';
 import { computeDrawOrder, checkOrderConsistency, medianDepth } from './order';
 import { computePoseDrawOrders } from './occlusionOrder';
+import { frameGeometryToViewport } from './framing';
 import type { ProjectionPartSource } from '../modelParts';
 import type { BakeBundle } from './types';
 
@@ -93,7 +94,7 @@ const cropTopDown = (
 };
 
 /** Bumped with every pipeline behavior change so stale bakes are detectable. */
-export const PIPELINE_VERSION = '2026-08-30.9';
+export const PIPELINE_VERSION = '2026-08-31.1';
 
 /**
  * Mouth-interior parts (teeth, tongue) clip to the lip-line drawable, the
@@ -208,9 +209,9 @@ export const buildLive2dModel = async (options: BuildOptions): Promise<{
         throw new Error('Bake produced no neutral sample.');
     }
 
-    const families = buildFamilyKeyforms(bundle, drawables);
+    const rawFamilies = buildFamilyKeyforms(bundle, drawables);
     const depthFamilies = buildDepthKeyforms(bundle, drawables);
-    const neutralPositions = drawables.map((drawable) => drawableNeutralPositions(drawable, neutral));
+    const rawNeutralPositions = drawables.map((drawable) => drawableNeutralPositions(drawable, neutral));
     const neutralMedians = drawables.map((drawable) => medianDepth(drawable, neutral));
     const orderIds = computeDrawOrder(drawables, neutral);
     const poseDrawOrders = computePoseDrawOrders(
@@ -224,9 +225,10 @@ export const buildLive2dModel = async (options: BuildOptions): Promise<{
     );
     const orderIndexById = new Map(orderIds.map((id, index) => [id, index]));
 
-    const evaluator = createPoseEvaluator(drawables, neutralPositions, families);
+    const evaluator = createPoseEvaluator(drawables, rawNeutralPositions, rawFamilies);
     const errorReport = evaluateComboError(bundle, drawables, evaluator);
     const orderReport = checkOrderConsistency(bundle, drawables, orderIds);
+    const framedGeometry = frameGeometryToViewport(rawNeutralPositions, rawFamilies, viewport);
 
     const live2dDrawables: Live2dDrawable[] = drawables.map((drawable, drawableIndex) => {
         const baked = bakedTextures.get(drawable.id);
@@ -234,15 +236,17 @@ export const buildLive2dModel = async (options: BuildOptions): Promise<{
             throw new Error(`Missing isolated texture for drawable ${drawable.id}.`);
         }
         const uvs = new Float32Array(drawable.vertexCount * 2);
-        const positions = neutralPositions[drawableIndex];
+        const sourcePositions = rawNeutralPositions[drawableIndex];
+        const positions = framedGeometry.neutralPositions[drawableIndex];
         for (let v = 0; v < drawable.vertexCount; v += 1) {
             // Neutral positions are in 1x canvas pixels; the baked crop and
             // texture live in textureScale-x texels. Convert positions into
             // texel space so every term shares one unit — mixing them makes
             // every UV negative and the whole model samples the first shelf.
-            uvs[v * 2] = (positions[v * 2] * textureScale - baked.cropX) / baked.texture.width;
+            uvs[v * 2] =
+                (sourcePositions[v * 2] * textureScale - baked.cropX) / baked.texture.width;
             uvs[v * 2 + 1] =
-                (positions[v * 2 + 1] * textureScale - baked.cropY) / baked.texture.height;
+                (sourcePositions[v * 2 + 1] * textureScale - baked.cropY) / baked.texture.height;
         }
         return {
             id: drawable.id,
@@ -274,7 +278,7 @@ export const buildLive2dModel = async (options: BuildOptions): Promise<{
             default: defaultValue,
         })),
         drawables: live2dDrawables,
-        families,
+        families: framedGeometry.families,
         depthFamilies,
         neutralDepths: neutralMedians,
         order: orderIds,

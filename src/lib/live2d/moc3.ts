@@ -1,6 +1,4 @@
 import { createPoseEvaluator } from './keyforms';
-import { rankByDepthFlips } from './order';
-import { nearestKey, rankOf } from './occlusionOrder';
 import type { Live2dModel } from './model';
 import type { FaceParamId, ParamAssignment } from './types';
 import { createZip, type ZipEntry } from './zip';
@@ -513,8 +511,6 @@ export const buildMoc3 = (
     // freeze the head-turn stacking: back hair never slides behind the face.
     // With no depth data the evaluator returns neutral depths, degrading to
     // the neutral stacking.
-    const angleXDefault =
-        angleXParamIndex >= 0 ? model.params[angleXParamIndex].default : 0;
     const partKsc = angleXParamIndex >= 0 ? angleXKeys.length : 1;
     const partsSetKey = String(angleXParamIndex);
     let partsKbIndex = kbParamSets.findIndex((set) => set.join(',') === partsSetKey);

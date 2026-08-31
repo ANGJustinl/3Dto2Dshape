@@ -77,7 +77,6 @@ const orderForSample = (
     viewport: { width: number; height: number },
     dynamicFlags: boolean[] = [],
 ): number[] => {
-    const count = drawables.length;
     const fields: (DepthField | null)[] = drawables.map((drawable) =>
         splatDepth(drawable, sample, viewport),
     );
@@ -111,7 +110,6 @@ const orderForSample = (
             const shared = xNearer + yNearer;
             if (shared < MIN_SHARED_CELLS) continue;
             const yWins = yNearer / shared >= DECISIVE_RATIO;
-            const xWins = xNearer / shared >= DECISIVE_RATIO;
             const xFirst = yWins ? false : true; // x wins or tie: neutral first
             beforeHair[x][y] = xFirst;
             beforeHair[y][x] = !xFirst;

@@ -105,7 +105,9 @@ export class FacePoseDriver {
 
             const value = assignment[param.id] ?? param.default;
             const angle =
-                param.source.sign * THREE.MathUtils.degToRad(value - param.default);
+                param.source.sign *
+                (param.source.rotationScale ?? 1) *
+                THREE.MathUtils.degToRad(value - param.default);
             deltaQuaternion.setFromAxisAngle(AXIS_VECTORS[param.source.axis], angle);
             bone.quaternion.multiply(deltaQuaternion);
         });

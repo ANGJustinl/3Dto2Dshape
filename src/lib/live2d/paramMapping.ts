@@ -23,7 +23,16 @@ export const FACE_PARAM_DEFINITIONS: FaceParamDefinition[] = [
         min: -30,
         max: 30,
         default: 0,
-        source: { kind: 'boneRotation', boneNames: ['頭', '首', 'head', 'neck'], axis: 'x', sign: 1 },
+        source: {
+            kind: 'boneRotation',
+            boneNames: ['頭', '首', 'head', 'neck'],
+            axis: 'x',
+            sign: 1,
+            // A 30-degree Live2D tracking value is visually closer to a
+            // ~20-degree physical MMD head pitch. Driving the full 30 degrees
+            // exposes the underside of the face and collapses the features.
+            rotationScale: 0.65,
+        },
     },
     {
         id: 'ParamAngleZ',

@@ -1,6 +1,5 @@
 import * as THREE from 'three';
-import { createPoseEvaluator, createDepthEvaluator, type DepthEvaluator, type PoseEvaluator } from './keyforms';
-import { nearestKey, rankOf } from './occlusionOrder';
+import { createPoseEvaluator, type PoseEvaluator } from './keyforms';
 import type { Live2dModel } from './model';
 import type { FaceParamId, ParamAssignment } from './types';
 
@@ -28,9 +27,6 @@ export class Live2dPreviewRuntime {
     private readonly scene = new THREE.Scene();
     private readonly camera: THREE.OrthographicCamera;
     private readonly evaluator: PoseEvaluator;
-    private readonly depthEvaluator: DepthEvaluator | null = null;
-    private readonly depthScratch: Float32Array;
-    private readonly depthOrderIndices: number[] = [];
     private readonly neutralOrder: number[] = [];
     private readonly maskGroups: Array<{
         maskerMesh: THREE.Mesh;
@@ -39,7 +35,6 @@ export class Live2dPreviewRuntime {
         stencilTestMaterial: THREE.MeshBasicMaterial;
     }> = [];
     private readonly drawables: Live2dModel['drawables'];
-    private readonly model: Live2dModel;
     private readonly outputs: Float32Array[];
     private readonly positionAttributes: THREE.BufferAttribute[] = [];
     private readonly meshes: THREE.Mesh[] = [];
@@ -62,36 +57,14 @@ export class Live2dPreviewRuntime {
         this.renderer.setClearColor(0x000000, 0);
 
         const { width, height } = model.viewport;
-        // Fit the ortho window to the model's neutral bounds so the character
-        // fills the canvas instead of floating in bake-view margins.
-        let minX = Number.POSITIVE_INFINITY;
-        let minY = Number.POSITIVE_INFINITY;
-        let maxX = Number.NEGATIVE_INFINITY;
-        let maxY = Number.NEGATIVE_INFINITY;
-        model.drawables.forEach((drawable) => {
-            for (let v = 0; v < drawable.vertexCount; v += 1) {
-                minX = Math.min(minX, drawable.neutralPositions[v * 2]);
-                maxX = Math.max(maxX, drawable.neutralPositions[v * 2]);
-                minY = Math.min(minY, drawable.neutralPositions[v * 2 + 1]);
-                maxY = Math.max(maxY, drawable.neutralPositions[v * 2 + 1]);
-            }
-        });
-        if (!Number.isFinite(minX)) {
-            minX = 0;
-            minY = 0;
-            maxX = width;
-            maxY = height;
-        }
-        const marginX = (maxX - minX) * 0.06;
-        const marginY = (maxY - minY) * 0.06;
-        const centerX = (minX + maxX) / 2;
-        const centerY = (minY + maxY) / 2;
-        const halfExtent = Math.max(maxX - minX, maxY - minY) / 2 + Math.max(marginX, marginY);
+        // Use the exact export viewport. build.ts already frames every
+        // additive pose into this canvas, so preview and Cubism/VTS now share
+        // identical composition instead of applying a second neutral-only fit.
         this.camera = new THREE.OrthographicCamera(
-            centerX - halfExtent,
-            centerX + halfExtent,
-            centerY - halfExtent,
-            centerY + halfExtent,
+            0,
+            width,
+            0,
+            height,
             0,
             10,
         );
@@ -100,7 +73,6 @@ export class Live2dPreviewRuntime {
 
         this.drawables = model.drawables;
         (window as unknown as { __live2dRuntime?: unknown }).__live2dRuntime = this;
-        this.model = model;
         this.outputs = model.drawables.map((drawable) => new Float32Array(drawable.vertexCount * 2));
         this.assignment = {} as ParamAssignment;
         this.neutralOrder.push(
@@ -116,14 +88,6 @@ export class Live2dPreviewRuntime {
 
         const neutralPositions = model.drawables.map((drawable) => drawable.neutralPositions);
         this.evaluator = createPoseEvaluator(model.drawables, neutralPositions, model.families);
-        this.depthScratch = new Float32Array(model.drawables.length);
-        if (Object.keys(model.depthFamilies ?? {}).length > 0) {
-            this.depthEvaluator = createDepthEvaluator(
-                model.drawables.length,
-                model.neutralDepths,
-                model.depthFamilies,
-            );
-        }
 
         model.drawables.forEach((drawable) => {
             const positions = new Float32Array(drawable.vertexCount * 3);

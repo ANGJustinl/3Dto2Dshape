@@ -127,6 +127,22 @@ describe('FacePoseDriver', () => {
         expect(head.quaternion.angleTo(rotationX.clone().multiply(rotationZ))).toBeLessThan(1e-6);
     });
 
+    it('maps the full pitch parameter range to a gentler physical head rotation', () => {
+        const { root, mesh, bones } = buildSkinnedMesh({ boneNames: ['頭'], morphNames: ['あ'] });
+        const head = bones[0];
+        const driver = new FacePoseDriver(mesh, resolvedParamsWith(mesh.uuid), root);
+        driver.applyNeutral();
+        const assignment = defaultAssignment();
+        assignment.ParamAngleY = -30;
+        driver.applyAssignment(assignment);
+
+        const expected = new THREE.Quaternion().setFromAxisAngle(
+            new THREE.Vector3(1, 0, 0),
+            THREE.MathUtils.degToRad(-19.5),
+        );
+        expect(head.quaternion.angleTo(expected)).toBeLessThan(1e-6);
+    });
+
     it('maps morph params through direct and inverse value maps', () => {
         const { root, mesh } = buildSkinnedMesh({ boneNames: ['頭'], morphNames: ['ウィンク', 'ウィンク右', 'あ'] });
         const params = resolvedParamsWith(mesh.uuid, { ParamEyeLOpen: 0, ParamEyeROpen: 1, ParamMouthOpenY: 2 });
