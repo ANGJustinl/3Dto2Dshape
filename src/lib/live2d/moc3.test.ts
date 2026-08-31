@@ -101,6 +101,9 @@ const SLOT = {
     amKbsi: 34,
     amKsbi: 35,
     amKsc: 36,
+    amFlags: 42,
+    amMaskBegins: 47,
+    amMaskCounts: 48,
     amVertexCounts: 43,
     amUvBegins: 44,
     paramsIds: 50,
@@ -119,12 +122,12 @@ const SLOT = {
     keys: 77,
     uvs: 78,
     positionIndices: 79,
+    masks: 80,
 } as const;
 
 const MID_EMPTY_SLOTS = [
     ...Array.from({ length: 19 }, (_, index) => 10 + index), // deformers/warp/rotation
     ...Array.from({ length: 9 }, (_, index) => 59 + index), // deformer keyforms
-    80, // masks
 ];
 const TRAILING_EMPTY_SLOTS = Array.from({ length: 12 }, (_, index) => 89 + index); // glue
 
@@ -170,12 +173,12 @@ describe('moc3 writer structure', () => {
             0, 0, 0, // deformers
             2, // art meshes
             6, // parameters
-            2, // part keyforms (one per part)
+            6, // part keyforms: 2 parts x 3 AngleX keys
             0, 0, // deformer keyforms (warp, rotation)
-            4, // art mesh keyforms: body 1 + head 3 (angle grid)
-            64, // keyform positions: 4 rows x 16-float padded stride
-            1, // parameter binding indices
-            2, // keyform bindings: dummy + head
+            6, // art mesh keyforms: body 3 + head 3 (all AngleX-bound)
+            96, // keyform positions: 6 rows x 16-float padded stride
+            1, // parameter binding indices (head and parts share the AngleX set)
+            2, // keyform bindings: dummy + shared AngleX set
             1, // parameter bindings
             3, // keys: one AngleX binding with 3 keys
             14, // uvs: (3 + 4 verts) * 2 floats
@@ -191,7 +194,7 @@ describe('moc3 writer structure', () => {
         // The count table is a fixed 128-byte section; the canvas section
         // sits exactly 128 bytes later, as the consistency checker demands.
         expect(read.slot(SLOT.canvas)).toBe(counts + 128);
-        expect(keyformCounts).toEqual([1, 3]);
+        expect(keyformCounts).toEqual([3, 3]);
     });
 
     it('writes the canvas with pixelsPerUnit = width', () => {
@@ -201,22 +204,26 @@ describe('moc3 writer structure', () => {
         expect(read.f32(canvas + 16)).toBe(200);
     });
 
-    it('writes parts and artmesh tables with the empty-binding convention', () => {
+    it('writes parts bound to AngleX and artmesh tables', () => {
         expect(read.idAt(read.slot(SLOT.partsIds))).toBe('Pbody');
         expect(read.s32(read.slot(SLOT.partsKsbi))).toBe(0);
-        expect(read.s32(read.slot(SLOT.partsKsc))).toBe(1);
+        expect(read.s32(read.slot(SLOT.partsKsc))).toBe(3);
+        // both parts share the AngleX keyform binding (kb[1], same set as head)
+        expect(read.s32(read.slot(SLOT.partsKbsi))).toBe(1);
+        expect(read.s32(read.slot(SLOT.partsKbsi) + 4)).toBe(1);
 
         expect(read.idAt(read.slot(SLOT.amIds))).toBe('Dbody');
         expect(read.idAt(read.slot(SLOT.amIds) + 64)).toBe('Dhead');
-        // body (static) -> empty binding 0; head -> binding 1.
+        // both artmeshes share the AngleX binding (body carries it for its
+        // draw-order keyforms even though it never moves).
         const kbsi = read.slot(SLOT.amKbsi);
-        expect(read.s32(kbsi)).toBe(0);
+        expect(read.s32(kbsi)).toBe(1);
         expect(read.s32(kbsi + 4)).toBe(1);
         const ksbi = read.slot(SLOT.amKsbi);
         expect(read.s32(ksbi)).toBe(0);
-        expect(read.s32(ksbi + 4)).toBe(1);
+        expect(read.s32(ksbi + 4)).toBe(3);
         const ksc = read.slot(SLOT.amKsc);
-        expect(read.s32(ksc)).toBe(1);
+        expect(read.s32(ksc)).toBe(3);
         expect(read.s32(ksc + 4)).toBe(3);
         // uv begins are in floats: head starts after body's 3 verts.
         const uvBegins = read.slot(SLOT.amUvBegins);
@@ -262,7 +269,7 @@ describe('moc3 writer structure', () => {
         // the middle one because [-6, +6] displacements average to zero.
         // Positions are centered pixels divided by pixelsPerUnit (100).
         const kpBegins = read.slot(SLOT.amKfKpBegins);
-        const headNeutralFloatBegin = read.s32(kpBegins + 2 * 4);
+        const headNeutralFloatBegin = read.s32(kpBegins + 4 * 4);
         const positions = read.slot(SLOT.kfPos);
         const expected = [
             (40 - 50) / 100, (60 - 100) / 100,
@@ -274,8 +281,58 @@ describe('moc3 writer structure', () => {
             expect(read.f32(positions + headNeutralFloatBegin * 4 + index * 4)).toBeCloseTo(value, 4);
         });
         // The -30 keyform shifts left by 6px for every vertex.
-        const headMinFloatBegin = read.s32(kpBegins + 1 * 4);
+        const headMinFloatBegin = read.s32(kpBegins + 3 * 4);
         expect(read.f32(positions + headMinFloatBegin * 4)).toBeCloseTo((34 - 50) / 100, 4);
+    });
+
+    it('writes mask tables and masked flags for declared masks', () => {
+        const model = buildFixtureModel();
+        // body masks head: head's opaque area clips to body's.
+        model.drawables[1].maskIds = ['body'];
+        const { moc3 } = buildMoc3(model);
+        const read = buildReader(moc3);
+        // head's mask table points at body (index 0) with count 1.
+        expect(read.s32(read.slot(SLOT.amMaskBegins) + 4)).toBe(0);
+        expect(read.u32(read.slot(SLOT.amMaskCounts) + 4)).toBe(1);
+        expect(read.s32(read.slot(SLOT.masks))).toBe(0);
+        // body unmasked; head carries flag 4 | 0x08.
+        expect(moc3[read.slot(SLOT.amFlags)]).toBe(4);
+        expect(moc3[read.slot(SLOT.amFlags) + 1]).toBe(12);
+        // count table row 17 (drawable masks) = 1 pool entry.
+        expect(read.u32(read.slot(SLOT.countInfo) + 17 * 4)).toBe(1);
+    });
+
+    it('keeps the neutral stacking at every AngleX cell (no dynamic reordering)', () => {
+        // Pose-driven flips buried facial overlays or dragged head-wrapping
+        // hair over the face in every scheme we tried; the shipped policy is
+        // the official one - constant neutral draw orders at all cells.
+        const model = buildFixtureModel();
+        model.drawables[0].label = 'D后髪-0';
+        model.drawables[1].label = 'D前髪-1';
+        model.depthFamilies = {
+            ParamAngleX: {
+                family: 'ParamAngleX',
+                default: 0,
+                values: [-30, 30],
+                displacements: [
+                    new Float32Array([0, 100]),
+                    new Float32Array([0, 40]),
+                ],
+            },
+        };
+        const { moc3 } = buildMoc3(model);
+        const read = buildReader(moc3);
+        const orders = read.slot(SLOT.partKfDrawOrders);
+        const orderAt = (mesh: number, key: number) => read.f32(orders + (mesh * 3 + key) * 4);
+        // rank scale: rank * 1000 / (drawableCount - 1)
+        const amOrders = read.slot(SLOT.amKfDrawOrders);
+        const amOrderAt = (meshKeyformIndex: number) => read.f32(amOrders + meshKeyformIndex * 4);
+        for (let cell = 0; cell < 3; cell += 1) {
+            expect(orderAt(0, cell)).toBe(0); // body renderOrder 0
+            expect(orderAt(1, cell)).toBe(1000); // head renderOrder 1
+            expect(amOrderAt(cell)).toBe(0);
+            expect(amOrderAt(3 + cell)).toBe(1000);
+        }
     });
 
     it('flips UV v-coordinates and writes s16 indices', () => {
@@ -330,11 +387,11 @@ describe('moc3 keyform budget', () => {
         const read = buildReader(moc3);
 
         // body: 1 keyform; head: 5 params x 3 keys = 243 (Mouth dropped).
-        expect(keyformCounts).toEqual([1, 243]);
+        expect(keyformCounts).toEqual([3, 243]);
 
         const counts = read.slot(SLOT.countInfo);
-        expect(read.u32(counts + 9 * 4)).toBe(244); // art mesh keyforms
-        expect(read.u32(counts + 10 * 4)).toBe(3904); // 244 rows x 16-float padded stride
+        expect(read.u32(counts + 9 * 4)).toBe(246); // art mesh keyforms (body 3 + head 243)
+        expect(read.u32(counts + 10 * 4)).toBe(3936); // 246 rows x 16-float padded stride
         expect(read.u32(counts + 13 * 4)).toBe(5); // parameter bindings (one per bound param)
 
         // MouthOpenY (param 5) binds nothing; EyeL still binds one.
@@ -364,7 +421,7 @@ describe('moc3 keyform budget', () => {
             displacements: [packed(0.1), packed(0.1)],
         };
         const { keyformCounts } = buildMoc3(model);
-        expect(keyformCounts).toEqual([1, 3]); // head still AngleX-only
+        expect(keyformCounts).toEqual([3, 3]); // head still AngleX-only
     });
 
     it('enumerates tensor slots column-major over ascending parameter indices (Cubism Core lookup order)', () => {
@@ -389,7 +446,7 @@ describe('moc3 keyform budget', () => {
         // Head keyforms are slots 0..3 (after the body's single slot); each
         // keyform's first vertex x reveals the AngleX digit, y the AngleY one.
         const headPose = (slot: number) => {
-            const begin = read.s32(kpBegins + (1 + slot) * 4) * 4;
+            const begin = read.s32(kpBegins + (3 + slot) * 4) * 4;
             return { x: read.f32(positions + begin), y: read.f32(positions + begin + 4) };
         };
         // Angle params always carry the full angleKeys [-30, 0, 30]
@@ -427,7 +484,7 @@ describe('moc3 keyform budget', () => {
         const morphKp = morphRead.slot(SLOT.amKfKpBegins);
         const morphPos = morphRead.slot(SLOT.kfPos);
         const morphPose = (slot: number) => {
-            const begin = morphRead.s32(morphKp + (1 + slot) * 4) * 4;
+            const begin = morphRead.s32(morphKp + (3 + slot) * 4) * 4;
             return morphRead.f32(morphPos + begin + 4);
         };
         expect(morphPose(0)).toBeCloseTo((60 - 20 - 100) / 100, 4);
@@ -441,7 +498,7 @@ describe('texture atlas packing', () => {
         const model = buildFixtureModel();
         const wide = { width: 7, height: 2, rgba: new Uint8Array(7 * 2 * 4).fill(9) };
         model.drawables[1].texture = wide;
-        const { atlas, uvs } = packTextureAtlas(model, 8);
+        const { atlas, uvs } = packTextureAtlas(model, 8, { pad: 0, bleed: 0 });
 
         // body 2x2 at (0,0); head 7x2 does not fit beside it (2+7>8) and
         // wraps onto a second shelf at y=2.
@@ -452,7 +509,47 @@ describe('texture atlas packing', () => {
         expect(uvs[1][0]).toBeCloseTo(0, 5);
         expect(uvs[1][1]).toBeCloseTo(2 / 4, 5);
     });
+
+    it('pads shelves apart and bleeds border texels into the gap', () => {
+        const model = buildFixtureModel();
+        const bodyTex = model.drawables[0].texture;
+        // opaque red body texture
+        for (let i = 0; i < bodyTex.rgba.length; i += 4) {
+            bodyTex.rgba[i] = 255;
+            bodyTex.rgba[i + 1] = 0;
+            bodyTex.rgba[i + 2] = 0;
+            bodyTex.rgba[i + 3] = 255;
+        }
+        const { atlas } = packTextureAtlas(model, 16, { pad: 2, bleed: 2 });
+        // body shelf sits at (2, 2) inside the pad frame
+        expect(atlas.rgba[(2 * 16 + 2) * 4 + 3]).toBe(255);
+        expect(atlas.rgba[(2 * 16 + 2) * 4]).toBe(255);
+        // bleed reaches 2px past the shelf's right edge (shelf is 2px wide)
+        expect(atlas.rgba[(2 * 16 + 3) * 4 + 3]).toBe(255);
+        expect(atlas.rgba[(2 * 16 + 3) * 4]).toBe(255);
+        expect(atlas.rgba[(2 * 16 + 4) * 4 + 3]).toBe(255);
+        expect(atlas.rgba[(2 * 16 + 4) * 4]).toBe(255);
+        // the atlas frame outside the bleed stays transparent
+        expect(atlas.rgba[3]).toBe(0);
+        expect(atlas.rgba[(7 * 16 + 15) * 4 + 3]).toBe(0);
+        expect(atlas.height).toBe(8);
+    });
+
+    it('snaps non-power-of-two atlas widths up to a POT', () => {
+        const model = buildFixtureModel();
+        const { atlas } = packTextureAtlas(model, 6144, { pad: 0, bleed: 0 });
+        expect(atlas.width).toBe(8192);
+        // content still packs from the top-left; UVs normalize against the
+        // snapped width so nothing shifts on screen.
+        expect(uvBounds(packTextureAtlas(model, 6144, { pad: 0, bleed: 0 }).uvs)).toBeLessThanOrEqual(1);
+    });
 });
+
+const uvBounds = (uvs: Float32Array[]): number => {
+    let max = 0;
+    uvs.forEach((uv) => uv.forEach((value) => { max = Math.max(max, value); }));
+    return max;
+};
 
 describe('moc3 archive', () => {
     it('bundles a VTS-shaped folder: moc3, atlas png, and model3.json', () => {

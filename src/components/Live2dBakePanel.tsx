@@ -1,11 +1,18 @@
 import { useRef, useState } from 'react';
 import type { BakeSummary } from '../lib/live2d/bakeSummary';
+import { PIPELINE_VERSION } from '../lib/live2d/build';
 
 type BuildProgress = (stage: 'samples' | 'textures', done: number, total: number, detail: string) => void;
 
 type Live2dBakePanelProps = {
-    onBuildLive2d: (onProgress: BuildProgress) => Promise<BakeSummary>;
+    onBuildLive2d: (onProgress: BuildProgress, textureScale: number) => Promise<BakeSummary>;
 };
+
+const TEXTURE_SCALE_OPTIONS = [
+    { scale: 1, label: 'Standard 2048' },
+    { scale: 2, label: 'HD 4096' },
+    { scale: 3, label: 'Ultra 6144' },
+];
 
 type BakeProgress = {
     stage: string;
@@ -20,6 +27,7 @@ const Live2dBakePanel = ({ onBuildLive2d }: Live2dBakePanelProps) => {
     const [summary, setSummary] = useState<BakeSummary | null>(null);
     const [elapsedMs, setElapsedMs] = useState<number | null>(null);
     const [error, setError] = useState<string | null>(null);
+    const [textureScale, setTextureScale] = useState(2);
     const runningRef = useRef(false);
 
     const handleBuild = async () => {
@@ -36,7 +44,7 @@ const Live2dBakePanel = ({ onBuildLive2d }: Live2dBakePanelProps) => {
         try {
             const result = await onBuildLive2d((stage, done, total, detail) => {
                 setProgress({ stage, done, total, detail });
-            });
+            }, textureScale);
             setSummary(result);
             setElapsedMs(performance.now() - startedAt);
         } catch (buildError) {
@@ -62,8 +70,22 @@ const Live2dBakePanel = ({ onBuildLive2d }: Live2dBakePanelProps) => {
 
     return (
         <details className="export-panel" open>
-            <summary>Live2D Face Bake</summary>
+            <summary>Live2D Face Bake (pipeline {PIPELINE_VERSION})</summary>
             <div className="export-panel-body">
+                <div className="export-hint">
+                    <div>Texture resolution (bake time scales with resolution)</div>
+                    {TEXTURE_SCALE_OPTIONS.map((option) => (
+                        <button
+                            key={option.scale}
+                            type="button"
+                            className={option.scale === textureScale ? 'part-chip active' : 'part-chip'}
+                            onClick={() => setTextureScale(option.scale)}
+                            disabled={running}
+                        >
+                            {option.label}
+                        </button>
+                    ))}
+                </div>
                 <button
                     type="button"
                     className="part-chip active"

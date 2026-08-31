@@ -36,6 +36,7 @@ type PartPanelProps = {
   ) => Promise<void>;
   onBuildLive2d: (
     onProgress: (stage: 'samples' | 'textures', done: number, total: number, detail: string) => void,
+    textureScale: number,
   ) => Promise<BakeSummary>;
   live2dModel: Live2dModel | null;
   onImportLive2dModel: (model: Live2dModel) => void;

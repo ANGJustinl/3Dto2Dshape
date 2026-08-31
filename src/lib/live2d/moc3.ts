@@ -1,4 +1,6 @@
 import { createPoseEvaluator } from './keyforms';
+import { rankByDepthFlips } from './order';
+import { nearestKey, rankOf } from './occlusionOrder';
 import type { Live2dModel } from './model';
 import type { FaceParamId, ParamAssignment } from './types';
 import { createZip, type ZipEntry } from './zip';
@@ -94,6 +96,7 @@ const SLOT = {
     keys: 77,
     uvs: 78,
     positionIndices: 79,
+    masks: 80,
     groupsObjBegins: 81,
     groupsObjCounts: 82,
     groupsObjTotalCounts: 83,
@@ -353,6 +356,10 @@ export const buildMoc3 = (
         keyValuesForParam(model, paramIndex, angleKeys, maxMorphKeys),
     );
 
+    const angleXParamIndex = model.params.findIndex((param) => param.id === 'ParamAngleX');
+    const angleXKeys =
+        angleXParamIndex >= 0 ? keyValuesByParamIndex[angleXParamIndex] : [0];
+
     // ---- ArtMesh plans ----
     // A param binds when it moves the drawable by more than 1% of the
     // drawable's neutral bounds (min 1px); the tensor product of bound params'
@@ -383,6 +390,12 @@ export const buildMoc3 = (
             parameterIndices.push(candidate.paramIndex);
             product *= keyCount;
         });
+        if (parameterIndices.length === 0 && angleXParamIndex >= 0) {
+            // Motionless meshes still bind AngleX: their draw-order keyforms
+            // must track the per-pose ranking or their constant order collides
+            // with a moving mesh's rank (ties re-freeze the stacking).
+            parameterIndices.push(angleXParamIndex);
+        }
         parameterIndices.sort((left, right) => left - right);
 
         const defaults = {} as ParamAssignment;
@@ -420,6 +433,31 @@ export const buildMoc3 = (
 
     const totalArtMeshKeyforms = plans.reduce((total, plan) => total + plan.keyformAssignments.length, 0);
     const bindingPlans = plans.filter((plan) => plan.parameterIndices.length > 0);
+
+    // ---- Mask table ----
+    // Per masked drawable: [begin, count] into the shared masker-index pool
+    // (indices of the masking drawables). Masked artmeshes also carry the
+    // Editor flag bit 0x08 on top of the constant 4.
+    const idToDrawableIndex = new Map<string, number>();
+    model.drawables.forEach((drawable, index) => {
+        idToDrawableIndex.set(drawable.id, index);
+    });
+    const maskPool: number[] = [];
+    const maskBegins: number[] = [];
+    const maskCounts: number[] = [];
+    const maskedFlags: Array<number | null> = model.drawables.map(() => null);
+    model.drawables.forEach((drawable, index) => {
+        const maskerIndices = (drawable.maskIds ?? [])
+            .map((id) => idToDrawableIndex.get(id))
+            .filter((value): value is number => value !== undefined);
+        maskBegins.push(maskPool.length);
+        maskCounts.push(maskerIndices.length);
+        maskerIndices.forEach((maskerIndex) => maskPool.push(maskerIndex));
+        if (maskerIndices.length > 0) {
+            maskedFlags[index] = 4 | 0x08;
+        }
+    });
+    const totalMaskIndices = maskPool.length;
 
     // Binding graph follows the sample models exactly (verified in VTube
     // Studio): ONE parameterBinding PER PARAMETER, shared by every artmesh
@@ -469,6 +507,50 @@ export const buildMoc3 = (
         keyformBindingIndexOf.set(plan.drawableIndex, rank + 1);
     });
 
+    // ---- Part draw order keyforms (head-turn occlusion) ----
+    // Every part carries keyforms bound to AngleX whose draw orders rank the
+    // whole model by evaluated median depth at that angle. Static part orders
+    // freeze the head-turn stacking: back hair never slides behind the face.
+    // With no depth data the evaluator returns neutral depths, degrading to
+    // the neutral stacking.
+    const angleXDefault =
+        angleXParamIndex >= 0 ? model.params[angleXParamIndex].default : 0;
+    const partKsc = angleXParamIndex >= 0 ? angleXKeys.length : 1;
+    const partsSetKey = String(angleXParamIndex);
+    let partsKbIndex = kbParamSets.findIndex((set) => set.join(',') === partsSetKey);
+    if (partsKbIndex < 0) {
+        kbParamSets.push([angleXParamIndex]);
+        partsKbIndex = kbParamSets.length - 1;
+    }
+    partsKbIndex += 1; // kb[0] is the shared empty binding
+    const depthRanksByCell: number[][] = [];
+    const partDrawOrders: number[] = [];
+    for (let cell = 0; cell < partKsc; cell += 1) {
+        // Constant neutral permutation: this model's neutral order isolates
+        // every hair piece between non-hair drawables, so ANY pose-driven
+        // reorder crosses a non-hair boundary (bangs behind the face = bald,
+        // bear over the chest). Head-turn occlusion is carried by the
+        // displacement field instead.
+        depthRanksByCell.push(model.drawables.map((drawable) => drawable.renderOrder));
+    }
+    // Per-pose rank lookup shared with the artmesh keyform draw orders:
+    // the Core exposes ARTMESH-level render orders (part tables never move
+    // them), so this table is the one that actually re-orders at runtime.
+    const ranksByAngleValue = new Map<number, number[]>();
+    if (angleXParamIndex >= 0) {
+        angleXKeys.forEach((value, cell) => {
+            ranksByAngleValue.set(value, depthRanksByCell[cell]);
+        });
+    }
+    // part-major layout: part m's keyforms occupy [m * partKsc, (m + 1) * partKsc).
+    model.drawables.forEach((_drawable, mesh) => {
+        depthRanksByCell.forEach((rankOfMesh) => {
+            partDrawOrders.push(
+                Math.round((rankOfMesh[mesh] * 1000) / Math.max(1, model.drawables.length - 1)),
+            );
+        });
+    });
+
     // ---- 0: CountInfoTable (23 counts + padding to a FIXED 128-byte
     // section; the checker expects the canvas section 128 bytes after the
     // count table, as in every real export). ----
@@ -480,7 +562,7 @@ export const buildMoc3 = (
             0, // rotation deformers
             model.drawables.length, // art meshes
             model.params.length, // parameters
-            model.drawables.length, // part keyforms (one per part)
+            model.drawables.length * partKsc, // part keyforms (AngleX-bound)
             0, // warp deformer keyforms
             0, // rotation deformer keyforms
             totalArtMeshKeyforms, // art mesh keyforms
@@ -491,7 +573,7 @@ export const buildMoc3 = (
             totalKeys, // keys
             totalVertexFloats, // uvs (float count)
             totalIndices, // position indices
-            0, // drawable masks
+            totalMaskIndices, // drawable masks
             1, // draw order groups
             model.drawables.length, // draw order group objects
             0, // glue
@@ -518,16 +600,17 @@ export const buildMoc3 = (
     });
     setSlot(SLOT.canvas, canvas);
 
-    // ---- 2-9: Parts (1:1 with drawables; keyform binding 0 is the shared
-    // empty binding, matching the sample models' convention). ----
+    // ---- 2-9: Parts (1:1 with drawables). Each part binds AngleX and
+    // carries one draw-order keyform per AngleX key, so the head-turn
+    // stacking re-ranks by evaluated depth (see the part keyform block). ----
     setSlot(SLOT.partsRuntime, zeroBytes(model.drawables.length * 8));
     setSlot(SLOT.partsIds, idsArray(model.drawables.map((drawable) => `P${drawable.id}`)));
-    setSlot(SLOT.partsKbsi, s32Array(model.drawables.map(() => 0)));
+    setSlot(SLOT.partsKbsi, s32Array(model.drawables.map(() => partsKbIndex)));
     setSlot(
         SLOT.partsKsbi,
-        s32Array(model.drawables.map((_drawable, index) => index)),
+        s32Array(model.drawables.map((_drawable, index) => index * partKsc)),
     );
-    setSlot(SLOT.partsKsc, s32Array(model.drawables.map(() => 1)));
+    setSlot(SLOT.partsKsc, s32Array(model.drawables.map(() => partKsc)));
     setSlot(SLOT.partsVisible, u32Array(model.drawables.map(() => 1)));
     setSlot(SLOT.partsEnabled, u32Array(model.drawables.map(() => 1)));
     setSlot(SLOT.partsParentPart, s32Array(model.drawables.map(() => -1)));
@@ -578,11 +661,13 @@ export const buildMoc3 = (
     setSlot(SLOT.amParentDeformer, s32Array(model.drawables.map(() => -1)));
     setSlot(SLOT.amTextureNos, u32Array(model.drawables.map(() => 0)));
     // drawableFlags is one BYTE per artmesh (not u32). Editor files set
-    // constant flag 4 on every artmesh (tororo/hiyori: uniform 4); VTS
-    // renders those files normally, so mirror the convention exactly.
+    // constant flag 4 on every artmesh (tororo/hiyori: uniform 4); masked
+    // artmeshes additionally carry bit 0x08 (akari: 12 on its maskees).
     setSlot(
         SLOT.amFlags,
-        appendArray(() => model.drawables.forEach(() => writer.u8(4))),
+        appendArray(() =>
+            model.drawables.forEach((_drawable, index) => writer.u8(maskedFlags[index] ?? 4)),
+        ),
     );
     setSlot(
         SLOT.amVertexCounts,
@@ -594,8 +679,8 @@ export const buildMoc3 = (
         SLOT.amPiCounts,
         s32Array(model.drawables.map((drawable) => drawable.triangles.length)),
     );
-    setSlot(SLOT.amMaskBegins, s32Array(model.drawables.map(() => 0)));
-    setSlot(SLOT.amMaskCounts, s32Array(model.drawables.map(() => 0)));
+    setSlot(SLOT.amMaskBegins, s32Array(maskBegins));
+    setSlot(SLOT.amMaskCounts, s32Array(maskCounts));
 
     // ---- 49-57: Parameters ----
     setSlot(SLOT.paramsRuntime, zeroBytes(model.params.length * 8));
@@ -620,11 +705,9 @@ export const buildMoc3 = (
         s32Array(model.params.map((_param, paramIndex) => (pbIndexOfParam.has(paramIndex) ? 1 : 0))),
     );
 
-    // ---- 58: PartKeyforms (draw order per part) ----
-    setSlot(
-        SLOT.partKfDrawOrders,
-        f32Array(model.drawables.map((drawable) => drawable.renderOrder)),
-    );
+    // ---- 58: PartKeyforms (draw order per part per AngleX key; cell k of
+    // part m lives at m * partKsc + k, matching parts.ksbi/ksc above) ----
+    setSlot(SLOT.partKfDrawOrders, f32Array(partDrawOrders));
     // 59-67: deformer keyforms empty.
 
     // ---- 68-70: ArtMeshKeyforms ----
@@ -632,14 +715,16 @@ export const buildMoc3 = (
         SLOT.amKfOpacities,
         f32Array(plans.flatMap((plan) => plan.keyformAssignments.map(() => 1))),
     );
+    // Constant neutral rank per mesh across all keyforms.
+    const orderScale = Math.max(1, model.drawables.length - 1);
+    const amKfOrderValues = plans.flatMap((plan) =>
+        plan.keyformAssignments.map(() =>
+            Math.round((model.drawables[plan.drawableIndex].renderOrder * 1000) / orderScale),
+        ),
+    );
     setSlot(
         SLOT.amKfDrawOrders,
-        f32Array(
-            plans.flatMap((plan) => {
-                const drawOrder = model.drawables[plan.drawableIndex].renderOrder;
-                return plan.keyformAssignments.map(() => drawOrder);
-            }),
-        ),
+        f32Array(amKfOrderValues),
     );
     // kpBegins are FLOAT offsets into the kfPos pool, and every keyform
     // block is padded to a multiple of 16 floats (the sample models'
@@ -798,6 +883,12 @@ export const buildMoc3 = (
         }),
     );
 
+    // ---- 80: Mask sources pool (one s32 masker-artmesh index per entry,
+    // addressed by am.maskBegins/maskCounts) ----
+    if (maskPool.length > 0) {
+        setSlot(SLOT.masks, s32Array(maskPool));
+    }
+
     // ---- 81-88: DrawOrderGroups ----
     // Every real export carries exactly one group covering all artmeshes;
     // glue and masks are optional (sample models ship with them at 0) but
@@ -809,14 +900,18 @@ export const buildMoc3 = (
     setSlot(SLOT.groupsObjBegins, s32Array([0]));
     setSlot(SLOT.groupsObjCounts, s32Array([model.drawables.length]));
     setSlot(SLOT.groupsObjTotalCounts, s32Array([model.drawables.length]));
-    // Real files store these bounds as integer bits in the f32 slots.
+    // Real files store these bounds as integer bits in the f32 slots, and
+    // they bound the KEYFORM draw-order value range (hiyori: 200..1000 over
+    // its keyform values 100..1000) — NOT the neutral renderOrder range. A
+    // 0..0 pair collapses every keyform draw order to a tie and freezes the
+    // stacking for good (the "head turn does nothing" failure).
     setSlot(
         SLOT.groupsMaxDrawOrders,
-        appendArray(() => writer.u32(Math.max(0, Math.round(Math.max(...drawOrders))))),
+        appendArray(() => writer.u32(Math.max(...partDrawOrders, ...amKfOrderValues, 1000))),
     );
     setSlot(
         SLOT.groupsMinDrawOrders,
-        appendArray(() => writer.u32(Math.max(0, Math.round(Math.min(...drawOrders))))),
+        appendArray(() => writer.u32(Math.min(...partDrawOrders, ...amKfOrderValues, 0))),
     );
     setSlot(SLOT.groupObjectsTypes, u32Array(model.drawables.map(() => 0)));
     setSlot(SLOT.groupObjectsIndices, s32Array(orderedArtMeshIndices));
@@ -851,15 +946,36 @@ export const buildMoc3 = (
     };
 };
 
-/** Packs the drawable textures into one shelf atlas and remaps UVs. */
-export const packTextureAtlas = (model: Live2dModel, atlasWidth = 2048) => {
-    let cursorX = 0;
-    let cursorY = 0;
+/**
+ * Packs the drawable textures into one shelf atlas and remaps UVs.
+ *
+ * Shelves sit `pad` pixels apart and every shelf's border texels are bled
+ * `bleed` pixels outward into that gap: mesh boundary triangles sample past
+ * their UV islands, and without bleed they read the transparent gap or a
+ * neighbour's texels, fraying every silhouette.
+ */
+export const packTextureAtlas = (
+    model: Live2dModel,
+    atlasWidth = 2048,
+    options: { pad?: number; bleed?: number } = {},
+) => {
+    // Non-power-of-two atlases break VTube Studio/Unity's texture pipeline;
+    // the requested width (e.g. 3x2048 = 6144) snaps up to the next POT.
+    const nextPow2 = (value: number) => {
+        let pot = 1;
+        while (pot < value) pot *= 2;
+        return pot;
+    };
+    atlasWidth = nextPow2(atlasWidth);
+    const pad = options.pad ?? Math.max(8, Math.round(atlasWidth / 256));
+    const bleed = options.bleed ?? pad;
+    let cursorX = pad;
+    let cursorY = pad;
     let shelfHeight = 0;
     const placements = model.drawables.map((drawable) => {
-        if (cursorX + drawable.texture.width > atlasWidth) {
-            cursorX = 0;
-            cursorY += shelfHeight;
+        if (cursorX + drawable.texture.width + pad > atlasWidth) {
+            cursorX = pad;
+            cursorY += shelfHeight + pad;
             shelfHeight = 0;
         }
         const placement = {
@@ -868,7 +984,7 @@ export const packTextureAtlas = (model: Live2dModel, atlasWidth = 2048) => {
             width: drawable.texture.width,
             height: drawable.texture.height,
         };
-        cursorX += placement.width;
+        cursorX += placement.width + pad;
         shelfHeight = Math.max(shelfHeight, placement.height);
         return placement;
     });
@@ -877,12 +993,7 @@ export const packTextureAtlas = (model: Live2dModel, atlasWidth = 2048) => {
     // so the atlas height is always rounded up to a power of two. Content
     // stays packed at the top; UVs below normalize against the final POT
     // height, so nothing shifts.
-    const nextPow2 = (value: number) => {
-        let pot = 1;
-        while (pot < value) pot *= 2;
-        return pot;
-    };
-    const atlasHeight = nextPow2(cursorY + shelfHeight);
+    const atlasHeight = nextPow2(cursorY + shelfHeight + pad);
     const rgba = new Uint8Array(atlasWidth * atlasHeight * 4);
     model.drawables.forEach((drawable, index) => {
         const placement = placements[index];
@@ -893,6 +1004,68 @@ export const packTextureAtlas = (model: Live2dModel, atlasWidth = 2048) => {
                 drawable.texture.rgba.subarray(sourceStart, sourceStart + placement.width * 4),
                 targetStart,
             );
+        }
+    });
+
+    // Bleed every shelf's border texels outward into the pad gap (BFS from
+    // the shelf's opaque texels, `bleed` steps, never crossing into another
+    // shelf's rect). Boundary triangles UV past their islands; without this
+    // they sample transparent gap texels and fray the silhouette.
+    placements.forEach((placement) => {
+        const x0 = Math.max(0, placement.x - bleed);
+        const y0 = Math.max(0, placement.y - bleed);
+        const x1 = Math.min(atlasWidth, placement.x + placement.width + bleed);
+        const y1 = Math.min(atlasHeight, placement.y + placement.height + bleed);
+        const regionW = x1 - x0;
+        const inShelf = (x: number, y: number) =>
+            x >= placement.x &&
+            x < placement.x + placement.width &&
+            y >= placement.y &&
+            y < placement.y + placement.height;
+        const depthLimit = new Int16Array(regionW * (y1 - y0)).fill(-1);
+        const queue: number[] = [];
+        for (let y = y0; y < y1; y += 1) {
+            for (let x = x0; x < x1; x += 1) {
+                if (rgba[(y * atlasWidth + x) * 4 + 3] > 0) {
+                    const index = (y - y0) * regionW + (x - x0);
+                    depthLimit[index] = 0;
+                    queue.push(x, y);
+                }
+            }
+        }
+        let head = 0;
+        while (head < queue.length) {
+            const x = queue[head];
+            const y = queue[head + 1];
+            head += 2;
+            const cell = (y - y0) * regionW + (x - x0);
+            const nextDepth = depthLimit[cell] + 1;
+            if (nextDepth > bleed) {
+                continue;
+            }
+            const neighbors = [x - 1, y, x + 1, y, x, y - 1, x, y + 1];
+            for (let n = 0; n < 8; n += 2) {
+                const nx = neighbors[n];
+                const ny = neighbors[n + 1];
+                if (nx < x0 || nx >= x1 || ny < y0 || ny >= y1) {
+                    continue;
+                }
+                if (inShelf(nx, ny)) {
+                    continue; // never paint over a shelf's own texels
+                }
+                const target = (ny * atlasWidth + nx) * 4;
+                if (rgba[target + 3] > 0) {
+                    continue; // already bled (or another shelf's texel)
+                }
+                const source = (y * atlasWidth + x) * 4;
+                rgba[target] = rgba[source];
+                rgba[target + 1] = rgba[source + 1];
+                rgba[target + 2] = rgba[source + 2];
+                rgba[target + 3] = 255;
+                const index = (ny - y0) * regionW + (nx - x0);
+                depthLimit[index] = nextDepth;
+                queue.push(nx, ny);
+            }
         }
     });
     const uvs = model.drawables.map((drawable, index) => {
@@ -915,9 +1088,11 @@ export type PngEncoder = (texture: { width: number; height: number; rgba: Uint8A
 export const buildMoc3Archive = (
     model: Live2dModel,
     encodePng: PngEncoder,
-    options: { angleKeys?: number[]; maxMorphKeys?: number } = {},
+    options: { angleKeys?: number[]; maxMorphKeys?: number; atlasWidth?: number } = {},
 ): Uint8Array => {
-    const packed = packTextureAtlas(model);
+    const atlasWidth =
+        options.atlasWidth ?? Math.min(8192, 2048 * (model.textureScale ?? 1));
+    const packed = packTextureAtlas(model, atlasWidth);
     const modelWithAtlasUvs: Live2dModel = {
         ...model,
         drawables: model.drawables.map((drawable, index) => ({

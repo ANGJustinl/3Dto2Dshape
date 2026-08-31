@@ -63,7 +63,13 @@ const drive = (assignment) => {
     });
     model.update();
 };
-drive({});
+// Pose overrides: --ParamAngleX=-30 --ParamMouthOpenY=0.8 ...
+const overrides = {};
+process.argv.slice(5).forEach((arg) => {
+    const match = arg.match(/^--([A-Za-z]+)=(.+)$/);
+    if (match) overrides[match[1]] = Number(match[2]);
+});
+drive(overrides);
 const rgba = new Float32Array(W * H * 4);
 
 const drawables = model.drawables;

@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { createPoseEvaluator, createDepthEvaluator, type DepthEvaluator, type PoseEvaluator } from './keyforms';
+import { nearestKey, rankOf } from './occlusionOrder';
 import type { Live2dModel } from './model';
 import type { FaceParamId, ParamAssignment } from './types';
 
@@ -11,6 +12,17 @@ import type { FaceParamId, ParamAssignment } from './types';
  * stay pinned to the neutral crop window, which is what makes the texture
  * follow the deformation.
  */
+const scratchScene = new THREE.Scene();
+
+const scratchSceneFor = (meshes: THREE.Mesh[]): THREE.Scene => {
+    scratchScene.clear();
+    meshes.forEach((mesh) => scratchScene.add(mesh));
+    return scratchScene;
+};
+
+const material0 = (meshes: THREE.Mesh[]): THREE.MeshBasicMaterial | undefined =>
+    meshes[0]?.material as THREE.MeshBasicMaterial | undefined;
+
 export class Live2dPreviewRuntime {
     private readonly renderer: THREE.WebGLRenderer;
     private readonly scene = new THREE.Scene();
@@ -19,7 +31,15 @@ export class Live2dPreviewRuntime {
     private readonly depthEvaluator: DepthEvaluator | null = null;
     private readonly depthScratch: Float32Array;
     private readonly depthOrderIndices: number[] = [];
+    private readonly neutralOrder: number[] = [];
+    private readonly maskGroups: Array<{
+        maskerMesh: THREE.Mesh;
+        maskedMeshes: THREE.Mesh[];
+        stencilWriteMaterial: THREE.MeshBasicMaterial;
+        stencilTestMaterial: THREE.MeshBasicMaterial;
+    }> = [];
     private readonly drawables: Live2dModel['drawables'];
+    private readonly model: Live2dModel;
     private readonly outputs: Float32Array[];
     private readonly positionAttributes: THREE.BufferAttribute[] = [];
     private readonly meshes: THREE.Mesh[] = [];
@@ -33,6 +53,7 @@ export class Live2dPreviewRuntime {
             alpha: true,
             antialias: true,
             preserveDrawingBuffer: true,
+            stencil: true,
         });
         this.renderer.setPixelRatio(1);
         // Canvas backing-store size, not clientWidth: offscreen A/B canvases
@@ -78,8 +99,15 @@ export class Live2dPreviewRuntime {
         this.camera.lookAt(0, 0, 0);
 
         this.drawables = model.drawables;
+        (window as unknown as { __live2dRuntime?: unknown }).__live2dRuntime = this;
+        this.model = model;
         this.outputs = model.drawables.map((drawable) => new Float32Array(drawable.vertexCount * 2));
         this.assignment = {} as ParamAssignment;
+        this.neutralOrder.push(
+            ...model.drawables
+                .map((_drawable, index) => index)
+                .sort((left, right) => model.drawables[left].renderOrder - model.drawables[right].renderOrder),
+        );
         this.defaults = {} as ParamAssignment;
         model.params.forEach((param) => {
             this.assignment[param.id] = param.default;
@@ -143,6 +171,35 @@ export class Live2dPreviewRuntime {
             this.meshes.push(mesh);
         });
 
+        // Cubism masking groups: masked drawables clip to the union of their
+        // maskers via the stencil buffer (mouth interior -> lip line).
+        const maskerIds = new Set<string>();
+        model.drawables.forEach((drawable) => (drawable.maskIds ?? []).forEach((id) => maskerIds.add(id)));
+        maskerIds.forEach((maskerId) => {
+            const maskerMesh = this.meshByDrawableId.get(maskerId);
+            if (!maskerMesh) {
+                return;
+            }
+            const maskedMeshes = model.drawables
+                .filter((drawable) => (drawable.maskIds ?? []).includes(maskerId))
+                .map((drawable) => this.meshByDrawableId.get(drawable.id))
+                .filter((mesh): mesh is THREE.Mesh => mesh !== undefined);
+            if (maskedMeshes.length === 0) {
+                return;
+            }
+            const stencilWriteMaterial = (maskerMesh.material as THREE.MeshBasicMaterial).clone();
+            stencilWriteMaterial.colorWrite = false;
+            stencilWriteMaterial.stencilWrite = true;
+            stencilWriteMaterial.stencilRef = 1;
+            stencilWriteMaterial.stencilFunc = THREE.AlwaysStencilFunc;
+            stencilWriteMaterial.stencilZPass = THREE.ReplaceStencilOp;
+            const stencilTestMaterial = (material0(maskedMeshes))!.clone();
+            stencilTestMaterial.stencilWrite = true;
+            stencilTestMaterial.stencilRef = 1;
+            stencilTestMaterial.stencilFunc = THREE.EqualStencilFunc;
+            this.maskGroups.push({ maskerMesh, maskedMeshes, stencilWriteMaterial, stencilTestMaterial });
+        });
+
         this.render();
     }
 
@@ -189,23 +246,46 @@ export class Live2dPreviewRuntime {
             this.positionAttributes[index].needsUpdate = true;
         });
 
-        // Dynamic draw order: re-rank by interpolated median depth so the
-        // static-order occlusion flips resolve as the pose changes.
-        if (this.depthEvaluator) {
-            this.depthEvaluator.evaluate(this.assignment, this.depthScratch);
-            this.depthOrderIndices.length = 0;
-            for (let index = 0; index < this.drawables.length; index += 1) {
-                this.depthOrderIndices.push(index);
-            }
-            this.depthOrderIndices.sort(
-                (left, right) => this.depthScratch[right] - this.depthScratch[left],
-            );
-            this.depthOrderIndices.forEach((drawableIndex, rank) => {
-                this.meshes[drawableIndex].renderOrder = rank;
-            });
+        // Constant neutral draw order at every pose. The neutral sequence
+        // isolates each hair piece between non-hair drawables, so no
+        // pose-driven reorder can avoid crossing a non-hair boundary
+        // (bald head, bear over the chest); rigid displacement carries the
+        // head-turn occlusion instead.
+        this.neutralOrder.forEach((drawableIndex, rank) => {
+            this.meshes[drawableIndex].renderOrder = rank;
+        });
+
+        if (this.maskGroups.length === 0) {
+            this.renderer.render(this.scene, this.camera);
+            return;
         }
 
-        this.renderer.render(this.scene, this.camera);
+        // Cubism masking: masked drawables render only inside their maskers'
+        // opaque area (stencil buffer).
+        const maskedSet = new Set<THREE.Mesh>();
+        this.maskGroups.forEach((group) => group.maskedMeshes.forEach((mesh) => maskedSet.add(mesh)));
+        const unmasked = this.scene.children.filter(
+            (child): child is THREE.Mesh => child instanceof THREE.Mesh && !maskedSet.has(child),
+        );
+        unmasked.sort((left, right) => left.renderOrder - right.renderOrder);
+        this.renderer.clear(true, true, true);
+        this.renderer.render(
+            unmasked.length === this.scene.children.length ? this.scene : scratchSceneFor(unmasked),
+            this.camera,
+        );
+        this.maskGroups.forEach((group) => {
+            const maskerMaterial = group.maskerMesh.material as THREE.MeshBasicMaterial;
+            group.maskerMesh.material = group.stencilWriteMaterial;
+            this.renderer.render(group.maskerMesh, this.camera);
+            group.maskerMesh.material = maskerMaterial;
+            group.maskedMeshes.forEach((mesh) => {
+                const material = mesh.material as THREE.MeshBasicMaterial;
+                mesh.material = group.stencilTestMaterial;
+                this.renderer.render(mesh, this.camera);
+                mesh.material = material;
+            });
+            this.renderer.render(group.maskerMesh, this.camera);
+        });
     }
 
     dispose() {

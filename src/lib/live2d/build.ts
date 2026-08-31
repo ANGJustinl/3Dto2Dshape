@@ -14,6 +14,7 @@ import {
 import { buildFamilyKeyforms, buildDepthKeyforms, createPoseEvaluator, evaluateComboError } from './keyforms';
 import type { Live2dDrawable, Live2dModel, Live2dTexture } from './model';
 import { computeDrawOrder, checkOrderConsistency, medianDepth } from './order';
+import { computePoseDrawOrders } from './occlusionOrder';
 import type { ProjectionPartSource } from '../modelParts';
 import type { BakeBundle } from './types';
 
@@ -44,6 +45,8 @@ export type BuildOptions = {
     comboCount?: number;
     seed?: number;
     texturePad?: number;
+    /** Supersample factor for baked drawable textures (1 = viewport resolution). */
+    textureScale?: number;
     /**
      * Preferred texture source: the stylized 2D composition pipeline (paint
      * layers + contours). Returns bottom-up RGBA like renderIsolated, or
@@ -89,6 +92,24 @@ const cropTopDown = (
     return { texture: { width, height, rgba }, cropX: cropX1, cropY: cropY1 };
 };
 
+/** Bumped with every pipeline behavior change so stale bakes are detectable. */
+export const PIPELINE_VERSION = '2026-08-30.9';
+
+/**
+ * Mouth-interior parts (teeth, tongue) clip to the lip-line drawable, the
+ * Cubism mouth-mask idiom: at head turns the interior parts displace further
+ * than the lips and would spill past the mouth outline without the mask.
+ */
+const mouthMaskIds = (label: string): string[] | undefined => {
+    // The lip-line drawable's id is deterministically derived from its own
+    // label (id === label), so no forward reference to the drawable list is
+    // needed inside the map that builds it.
+    if (!/^(D齿|D口舌)/.test(label)) {
+        return undefined;
+    }
+    return ['D口线-18'];
+};
+
 export const buildLive2dModel = async (options: BuildOptions): Promise<{
     model: Live2dModel;
     bundle: BakeBundle;
@@ -103,6 +124,7 @@ export const buildLive2dModel = async (options: BuildOptions): Promise<{
         comboCount = 100,
         seed,
         texturePad = 12,
+        textureScale = 1,
         renderDrawable2D,
         renderIsolated,
         onProgress,
@@ -148,15 +170,25 @@ export const buildLive2dModel = async (options: BuildOptions): Promise<{
             };
             drawables = decomposeDrawables(bundleForDecomposition);
 
+            const textureViewport = {
+                width: Math.round(viewport.width * textureScale),
+                height: Math.round(viewport.height * textureScale),
+            };
             for (let index = 0; index < drawables.length; index += 1) {
                 const drawable = drawables[index];
                 onProgress?.('textures', index, drawables.length, drawable.label);
                 const composed = renderDrawable2D
-                    ? await renderDrawable2D(drawable.leafIds, neutralCamera, viewport)
+                    ? await renderDrawable2D(drawable.leafIds, neutralCamera, textureViewport)
                     : null;
-                const render = composed ?? renderIsolated(drawable.leafIds, neutralCamera, viewport);
-                const bounds = drawableBoundsAtNeutral(drawable, neutral);
-                const cropped = cropTopDown(render, bounds, texturePad, viewport);
+                const render = composed ?? renderIsolated(drawable.leafIds, neutralCamera, textureViewport);
+                const neutralBounds = drawableBoundsAtNeutral(drawable, neutral);
+                const bounds = {
+                    minX: neutralBounds.minX * textureScale,
+                    minY: neutralBounds.minY * textureScale,
+                    maxX: neutralBounds.maxX * textureScale,
+                    maxY: neutralBounds.maxY * textureScale,
+                };
+                const cropped = cropTopDown(render, bounds, texturePad * textureScale, textureViewport);
                 bakedTextures.set(drawable.id, cropped);
             }
             onProgress?.('textures', drawables.length, drawables.length, 'done');
@@ -181,6 +213,15 @@ export const buildLive2dModel = async (options: BuildOptions): Promise<{
     const neutralPositions = drawables.map((drawable) => drawableNeutralPositions(drawable, neutral));
     const neutralMedians = drawables.map((drawable) => medianDepth(drawable, neutral));
     const orderIds = computeDrawOrder(drawables, neutral);
+    const poseDrawOrders = computePoseDrawOrders(
+        drawables,
+        orderIds.map((id) => drawables.findIndex((drawable) => drawable.id === id)),
+        bundle.samples
+            .filter((sample) => sample.kind === 'family-sweep' && sample.family)
+            .map((sample) => ({ family: sample.family as string, sample })),
+        viewport,
+        drawables.map((drawable) => /髪|Hair|hair/.test(drawable.label)),
+    );
     const orderIndexById = new Map(orderIds.map((id, index) => [id, index]));
 
     const evaluator = createPoseEvaluator(drawables, neutralPositions, families);
@@ -195,8 +236,13 @@ export const buildLive2dModel = async (options: BuildOptions): Promise<{
         const uvs = new Float32Array(drawable.vertexCount * 2);
         const positions = neutralPositions[drawableIndex];
         for (let v = 0; v < drawable.vertexCount; v += 1) {
-            uvs[v * 2] = (positions[v * 2] - baked.cropX) / baked.texture.width;
-            uvs[v * 2 + 1] = (positions[v * 2 + 1] - baked.cropY) / baked.texture.height;
+            // Neutral positions are in 1x canvas pixels; the baked crop and
+            // texture live in textureScale-x texels. Convert positions into
+            // texel space so every term shares one unit — mixing them makes
+            // every UV negative and the whole model samples the first shelf.
+            uvs[v * 2] = (positions[v * 2] * textureScale - baked.cropX) / baked.texture.width;
+            uvs[v * 2 + 1] =
+                (positions[v * 2 + 1] * textureScale - baked.cropY) / baked.texture.height;
         }
         return {
             id: drawable.id,
@@ -211,6 +257,7 @@ export const buildLive2dModel = async (options: BuildOptions): Promise<{
             uvs,
             texture: baked.texture,
             renderOrder: orderIndexById.get(drawable.id) ?? drawableIndex,
+            masks: mouthMaskIds(drawable.label),
         };
     });
 
@@ -233,6 +280,8 @@ export const buildLive2dModel = async (options: BuildOptions): Promise<{
         order: orderIds,
         errorReport,
         orderReport,
+        textureScale,
+        poseDrawOrders,
     };
 
     return { model, bundle };

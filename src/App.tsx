@@ -374,6 +374,7 @@ function App() {
     const buildLive2dRef = useRef<
         ((
             onProgress: (stage: 'samples' | 'textures', done: number, total: number, detail: string) => void,
+            textureScale: number,
         ) => Promise<{ model: Live2dModel; summary: BakeSummary }>) | null
     >(null);
     const [parts, setParts] = useState<PartNode[]>([]);
@@ -1066,7 +1067,7 @@ function App() {
         // playback is paused. renderIsolated renders only the given leaves to
         // an offscreen target with the bake camera; the animate loop cannot
         // interleave because each call is synchronous.
-        buildLive2dRef.current = async (onProgress) => {
+        buildLive2dRef.current = async (onProgress, textureScale = 2) => {
             const root = modelRef.current;
             const bakeParts = projectionPartsRef.current;
             const maskState = projectionMaskStateRef.current;
@@ -1218,6 +1219,7 @@ function App() {
                     renderDrawable2D,
                     renderIsolated,
                     onProgress,
+                    textureScale,
                 });
                 console.log('Live2D model built.', {
                     drawables: builtModel.drawables.length,
@@ -1289,12 +1291,13 @@ function App() {
 
     const handleBuildLive2d = async (
         onProgress: (stage: 'samples' | 'textures', done: number, total: number, detail: string) => void,
+        textureScale: number,
     ): Promise<BakeSummary> => {
         const runner = buildLive2dRef.current;
         if (!runner) {
             throw new Error('The scene is not ready for building.');
         }
-        const { model, summary } = await runner(onProgress);
+        const { model, summary } = await runner(onProgress, textureScale);
         setLive2dModel(model);
         return summary;
     };

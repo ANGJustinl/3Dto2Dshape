@@ -39,6 +39,12 @@ export type Live2dDrawable = {
     texture: Live2dTexture;
     /** Painter's order: smaller renders first (farther). */
     renderOrder: number;
+    /**
+     * Ids of drawables whose opaque region masks this drawable (Cubism
+     * masking): anything this drawable draws outside the union of the
+     * maskers' rendered area is clipped. Empty = unmasked.
+     */
+    maskIds?: string[];
 };
 
 export type Live2dModel = {
@@ -55,6 +61,17 @@ export type Live2dModel = {
     neutralDepths: number[];
     /** Drawable ids, far-to-near. */
     order: string[];
+    /** Supersample factor the textures were baked at (atlas = 2048 * scale). */
+    textureScale?: number;
+    /**
+     * Occlusion-aware draw orders per pose key (from the sweep samples):
+     * orders[k] lists drawable indices far-to-near at values[k].
+     */
+    poseDrawOrders?: Array<{
+        family: string;
+        values: number[];
+        orders: number[][];
+    }>;
     errorReport: ComboErrorReport;
     orderReport: {
         flips: OrderFlip[];
