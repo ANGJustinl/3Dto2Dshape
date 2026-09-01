@@ -133,7 +133,9 @@ describe('FacePoseDriver', () => {
         const driver = new FacePoseDriver(mesh, resolvedParamsWith(mesh.uuid), root);
         driver.applyNeutral();
         const assignment = defaultAssignment();
-        assignment.ParamAngleY = -30;
+        // Live2D convention: positive pitch = head tilts UP, which is a
+        // NEGATIVE X bone rotation.
+        assignment.ParamAngleY = 30;
         driver.applyAssignment(assignment);
 
         const expected = new THREE.Quaternion().setFromAxisAngle(

@@ -27,7 +27,11 @@ export const FACE_PARAM_DEFINITIONS: FaceParamDefinition[] = [
             kind: 'boneRotation',
             boneNames: ['頭', '首', 'head', 'neck'],
             axis: 'x',
-            sign: 1,
+            // Positive X rotation pitches the MMD head DOWN, but the Live2D
+            // convention (VSeeFace/VTS tracking, official models like hiyori)
+            // is positive ParamAngleY = head tilts UP. Invert so +30 tracking
+            // bakes as looking up.
+            sign: -1,
             // A 30-degree Live2D tracking value is visually closer to a
             // ~20-degree physical MMD head pitch. Driving the full 30 degrees
             // exposes the underside of the face and collapses the features.
