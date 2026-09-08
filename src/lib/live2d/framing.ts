@@ -1,4 +1,4 @@
-import type { FamilyKeyforms } from './keyforms';
+import type { FamilyKeyforms, JointKeyforms } from './keyforms';
 
 export type GeometryBounds = {
     minX: number;
@@ -31,9 +31,10 @@ const emptyBounds = (): GeometryBounds => ({
 export const conservativeGeometryBounds = (
     neutralPositions: Float32Array[],
     families: Record<string, FamilyKeyforms>,
+    joints: JointKeyforms[] = [],
 ): GeometryBounds => {
     const bounds = emptyBounds();
-    const familyList = Object.values(families);
+    const familyList = [...Object.values(families), ...joints];
     let packedOffset = 0;
 
     neutralPositions.forEach((positions) => {
@@ -85,8 +86,9 @@ export const frameGeometryToViewport = (
     families: Record<string, FamilyKeyforms>,
     viewport: { width: number; height: number },
     requestedMargin = Math.max(16, Math.round(Math.min(viewport.width, viewport.height) * 0.024)),
+    joints: JointKeyforms[] = [],
 ) => {
-    const sourceBounds = conservativeGeometryBounds(neutralPositions, families);
+    const sourceBounds = conservativeGeometryBounds(neutralPositions, families, joints);
     const margin = Math.min(
         requestedMargin,
         Math.max(0, Math.floor(Math.min(viewport.width, viewport.height) / 2) - 1),
@@ -135,6 +137,10 @@ export const frameGeometryToViewport = (
     return {
         neutralPositions: framedNeutralPositions,
         families: framedFamilies,
+        jointKeyforms: joints.map((joint) => ({
+            ...joint,
+            displacements: joint.displacements.map((block) => block.map((value) => value * scale)),
+        })),
         transform: {
             scale,
             offsetX,

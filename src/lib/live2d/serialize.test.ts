@@ -103,6 +103,19 @@ describe('store zip', () => {
 });
 
 describe('live2d model serialization', () => {
+    it('retains joint grids and resolved mask IDs through a roundtrip', async () => {
+        const model = buildModel();
+        model.drawables[0].maskIds = ['mouth-mask'];
+        model.jointKeyforms = [{
+            x: { family: 'ParamAngleX', default: 0, values: [-30, 0, 30] },
+            y: { family: 'ParamAngleY', default: 0, values: [-30, 0, 30] },
+            displacements: Array.from({ length: 9 }, (_, i) => new Float32Array(8).fill(i)),
+        }];
+        const copy = await importModel(exportModel(model, stubCodec), stubCodec);
+        expect(copy.jointKeyforms).toEqual(model.jointKeyforms);
+        expect(copy.drawables[0].maskIds).toEqual(['mouth-mask']);
+        expect(verifyRoundtripBytes(model, copy).filter((p) => !p.includes('render order'))).toEqual([]);
+    });
     it('exports and re-imports into an identical model', async () => {
         const model = buildModel();
         const zipBytes = exportModel(model, stubCodec);

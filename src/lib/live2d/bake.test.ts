@@ -120,8 +120,8 @@ describe('bakeFaceParams orchestration', () => {
             onProgress: (done, total) => progress.push({ done, total }),
         });
 
-        // 1 neutral + 3 angle sweeps (13) + 3 morph sweeps (9) + 4 combos
-        expect(bundle.samples).toHaveLength(1 + 13 * 3 + 9 * 3 + 4);
+        // Neutral + axial sweeps + 4 head corners + 4 random QA combos.
+        expect(bundle.samples).toHaveLength(1 + 13 * 3 + 9 * 3 + 4 + 4);
         expect(bundle.samples[0].kind).toBe('neutral');
         expect(bundle.samples[1].kind).toBe('family-sweep');
         expect(bundle.samples[1].family).toBe('ParamAngleX');
@@ -158,7 +158,7 @@ describe('bakeFaceParams orchestration', () => {
         });
 
         // First wait resolves false; the retried request must still land data.
-        expect(bundle.samples).toHaveLength(1 + 13 * 3 + 9 * 3);
+        expect(bundle.samples).toHaveLength(1 + 13 * 3 + 9 * 3 + 4);
         expect(bundle.samples[0].meshes[0].vertices.screenX.length).toBe(8);
         expect(projector.requestLog.length).toBeGreaterThanOrEqual(bundle.samples.length);
     });

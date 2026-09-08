@@ -1,4 +1,5 @@
 import type { BakeBundle, BakeSample } from './types';
+import { splitHairLayers } from './hairLayers';
 
 /**
  * M1: pose-invariant drawable decomposition.
@@ -86,7 +87,7 @@ export const decomposeDrawables = (bundle: BakeBundle): DrawableDecomposition[] 
             void key;
         });
 
-    return drawables;
+    return drawables.flatMap(splitHairLayers);
 };
 
 /** Neutral-sample screen positions for a drawable, compacted to its vertex table. */

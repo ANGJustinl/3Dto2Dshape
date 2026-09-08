@@ -17,6 +17,8 @@ import { computeDrawOrder, checkOrderConsistency, medianDepth } from './order';
 import { computePoseDrawOrders } from './occlusionOrder';
 import { frameGeometryToViewport } from './framing';
 import { stabilizeHeadAngleKeyforms } from './headStabilization';
+import { buildHeadJointKeyforms } from './headJoint';
+import { resolveMouthMaskIds } from './mouthMasks';
 import type { ProjectionPartSource } from '../modelParts';
 import type { BakeBundle } from './types';
 
@@ -95,22 +97,7 @@ const cropTopDown = (
 };
 
 /** Bumped with every pipeline behavior change so stale bakes are detectable. */
-export const PIPELINE_VERSION = '2026-09-01.1';
-
-/**
- * Mouth-interior parts (teeth, tongue) clip to the lip-line drawable, the
- * Cubism mouth-mask idiom: at head turns the interior parts displace further
- * than the lips and would spill past the mouth outline without the mask.
- */
-const mouthMaskIds = (label: string): string[] | undefined => {
-    // The lip-line drawable's id is deterministically derived from its own
-    // label (id === label), so no forward reference to the drawable list is
-    // needed inside the map that builds it.
-    if (!/^(D齿|D口舌)/.test(label)) {
-        return undefined;
-    }
-    return ['D口线-18'];
-};
+export const PIPELINE_VERSION = '2026-09-08.1';
 
 export const buildLive2dModel = async (options: BuildOptions): Promise<{
     model: Live2dModel;
@@ -231,10 +218,11 @@ export const buildLive2dModel = async (options: BuildOptions): Promise<{
     );
     const orderIndexById = new Map(orderIds.map((id, index) => [id, index]));
 
-    const evaluator = createPoseEvaluator(drawables, rawNeutralPositions, stabilizedFamilies);
+    const joints = buildHeadJointKeyforms(bundle, drawables, rawNeutralPositions, rawFamilies);
+    const evaluator = createPoseEvaluator(drawables, rawNeutralPositions, stabilizedFamilies, joints);
     const errorReport = evaluateComboError(bundle, drawables, evaluator);
     const orderReport = checkOrderConsistency(bundle, drawables, orderIds);
-    const framedGeometry = frameGeometryToViewport(rawNeutralPositions, stabilizedFamilies, viewport);
+    const framedGeometry = frameGeometryToViewport(rawNeutralPositions, stabilizedFamilies, viewport, undefined, joints);
 
     const live2dDrawables: Live2dDrawable[] = drawables.map((drawable, drawableIndex) => {
         const baked = bakedTextures.get(drawable.id);
@@ -267,7 +255,7 @@ export const buildLive2dModel = async (options: BuildOptions): Promise<{
             uvs,
             texture: baked.texture,
             renderOrder: orderIndexById.get(drawable.id) ?? drawableIndex,
-            masks: mouthMaskIds(drawable.label),
+            maskIds: resolveMouthMaskIds(drawable, drawables),
         };
     });
 
@@ -285,6 +273,7 @@ export const buildLive2dModel = async (options: BuildOptions): Promise<{
         })),
         drawables: live2dDrawables,
         families: framedGeometry.families,
+        jointKeyforms: framedGeometry.jointKeyforms,
         depthFamilies,
         neutralDepths: neutralMedians,
         order: orderIds,

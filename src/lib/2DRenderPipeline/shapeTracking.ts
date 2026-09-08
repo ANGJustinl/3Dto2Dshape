@@ -1,4 +1,5 @@
 import type { ProjectedPartShape, ProjectionOverlaySettings } from '../2DRenderShared/types';
+import { stabilizeContour } from './contourTracking';
 
 const focusRank = { abstract: 0, support: 1, focal: 2 } as const;
 
@@ -67,6 +68,7 @@ export class ShapeTrackState {
                 previous = [...this.previousShapes.values()]
                     .filter(
                         (candidate) =>
+                            candidate.sourceLeafId === shape.sourceLeafId &&
                             candidate.paintLayer === shape.paintLayer &&
                             candidate.macroGroup === shape.macroGroup &&
                             focusRank[candidate.focusLevel] === focusRank[shape.focusLevel],
@@ -74,7 +76,7 @@ export class ShapeTrackState {
                     .sort((left, right) => shapeDistance(shape, left) - shapeDistance(shape, right))[0];
             }
 
-            if (!previous || usedPrevious.has(previous.stableId) || shapeDistance(shape, previous) > 180) {
+            if (!previous || previous.sourceLeafId !== shape.sourceLeafId || usedPrevious.has(previous.stableId) || shapeDistance(shape, previous) > 180) {
                 return shape;
             }
 
@@ -88,7 +90,7 @@ export class ShapeTrackState {
                     x: shape.centroid.x + dx,
                     y: shape.centroid.y + dy,
                 },
-                loops: shape.loops.map((loop) =>
+                loops: stabilizeContour(shape, previous, stability).map((loop) =>
                     loop.map((point) => ({ x: point.x + dx, y: point.y + dy })),
                 ),
                 color: colorDistance(previous.color, shape.color) < 0.12 ? previous.color : shape.color,

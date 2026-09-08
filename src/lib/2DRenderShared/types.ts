@@ -112,6 +112,8 @@ export type ProjectedPartShape = {
     area: number;
     centroid: Point2D;
     loops: Array<Array<{ x: number; y: number }>>;
+    /** Optional protected contour segments from shared-boundary simplifiers. */
+    loopSharedRanges?: number[][];
     rasterBounds: {
         width: number;
         height: number;

@@ -138,6 +138,24 @@ const Live2DPreviewPanel = ({ model, onImportModel }: Live2DPreviewPanelProps) =
         setAssignment(next);
     };
 
+    const headYaw = model.params.find((param) => param.id === 'ParamAngleX');
+    const headPitch = model.params.find((param) => param.id === 'ParamAngleY');
+    const handleHeadPreset = (x: number, y: number) => {
+        const next = Object.fromEntries(model.params.map((param) => [param.id, param.default])) as ParamAssignment;
+        next.ParamAngleX = x;
+        next.ParamAngleY = y;
+        setPlaying(false);
+        setMotion(null);
+        setExpression(null);
+        setAssignment(next);
+        const runtime = runtimeRef.current;
+        if (runtime) {
+            runtime.resetDrawableOpacities();
+            runtime.setAssignment(next);
+            runtime.render();
+        }
+    };
+
     const handleExport = () => {
         const zipBytes = exportModel(model);
         const blob = new Blob([zipBytes.buffer as ArrayBuffer], { type: 'application/zip' });
@@ -314,6 +332,19 @@ const Live2DPreviewPanel = ({ model, onImportModel }: Live2DPreviewPanelProps) =
                         <span>{(assignment[param.id] ?? param.default).toFixed(2)}</span>
                     </label>
                 ))}
+                {headYaw && headPitch ? (
+                    <div role="group" aria-label="Head pose grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 4 }}>
+                        {[headPitch.max, headPitch.default, headPitch.min].flatMap((y, row) =>
+                            [headYaw.min, headYaw.default, headYaw.max].map((x, col) => (
+                                <button key={`${row}-${col}`} type="button" className="part-chip"
+                                    title={`AngleX ${x}, AngleY ${y}`}
+                                    onClick={() => handleHeadPreset(x, y)}>
+                                    {['Left up', 'Up', 'Right up', 'Left', 'Neutral', 'Right', 'Left down', 'Down', 'Right down'][row * 3 + col]}
+                                </button>
+                            )),
+                        )}
+                    </div>
+                ) : null}
                 <div className="export-grid-2">
                     <button type="button" className="part-chip" onClick={handleReset}>
                         Reset pose
@@ -421,6 +452,7 @@ const Live2DPreviewPanel = ({ model, onImportModel }: Live2DPreviewPanelProps) =
                 <div className="export-hint">
                     <div>
                         {model.drawables.length} drawables · {Object.keys(model.families).length} families ·
+                        {' '}{model.jointKeyforms?.length ?? 0} joint grids ·
                         {' '}combo error mean {errorReport.meanErrorPx.toFixed(2)}px / max{' '}
                         {errorReport.maxErrorPx.toFixed(2)}px
                     </div>

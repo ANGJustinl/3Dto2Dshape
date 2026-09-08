@@ -20,10 +20,25 @@ export type FamilyKeyforms = {
     /** Swept param values, ascending (keyform parameter positions). */
     values: number[];
     /**
-     * displacements[drawableIndex][k * vertexCount * 2 + v * 2 (+1)] is the
-     * xy displacement of drawable vertex v at keyform k.
+     * displacements[k][drawableOffset + v * 2 (+1)] is the xy displacement
+     * of drawable vertex v at keyform k. Drawable blocks are concatenated.
      */
     displacements: Float32Array[];
+};
+
+/** Joint residuals, added to single-axis families; X varies fastest. */
+export type JointKeyforms = {
+    x: Pick<FamilyKeyforms, 'family' | 'default' | 'values'>;
+    y: Pick<FamilyKeyforms, 'family' | 'default' | 'values'>;
+    displacements: Float32Array[];
+};
+
+const bracket = (values: number[], value: number) => {
+    const clamped = Math.max(values[0], Math.min(values[values.length - 1], value));
+    let upper = 1;
+    while (upper < values.length - 1 && values[upper] < clamped) upper++;
+    const lower = upper - 1;
+    return { lower, upper, t: (clamped - values[lower]) / (values[upper] - values[lower]) };
 };
 
 export const buildFamilyKeyforms = (
@@ -189,6 +204,7 @@ export const createPoseEvaluator = (
     drawables: Array<Pick<DrawableDecomposition, 'vertexCount'>>,
     neutralPositions: Float32Array[],
     families: Record<string, FamilyKeyforms>,
+    joints: JointKeyforms[] = [],
 ): PoseEvaluator => {
     const offsets = drawableDisplacementOffsets(
         drawables as DrawableDecomposition[],
@@ -222,6 +238,25 @@ export const createPoseEvaluator = (
                     );
                 });
             });
+            for (const joint of joints) {
+                const x = bracket(joint.x.values, assignment[joint.x.family] ?? joint.x.default);
+                const y = bracket(joint.y.values, assignment[joint.y.family] ?? joint.y.default);
+                const width = joint.x.values.length;
+                const blocks = [
+                    joint.displacements[y.lower * width + x.lower],
+                    joint.displacements[y.lower * width + x.upper],
+                    joint.displacements[y.upper * width + x.lower],
+                    joint.displacements[y.upper * width + x.upper],
+                ];
+                const weights = [(1-x.t)*(1-y.t), x.t*(1-y.t), (1-x.t)*y.t, x.t*y.t];
+                displacementScratch.forEach((output, index) => {
+                    for (let local = 0; local < output.length; local++) {
+                        for (let corner = 0; corner < 4; corner++) {
+                            output[local] += blocks[corner][offsets[index] + local] * weights[corner];
+                        }
+                    }
+                });
+            }
             drawables.forEach((drawable, drawableIndex) => {
                 const neutral = neutralPositions[drawableIndex];
                 const displacement = displacementScratch[drawableIndex];

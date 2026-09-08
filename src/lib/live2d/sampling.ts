@@ -97,6 +97,21 @@ export const buildSamplePlan = (
         });
     });
 
+    // The existing axial sweeps supply the centre row/column of the head
+    // grid. Capture its four corners independently of random QA samples.
+    const yaw = params.find((param) => param.id === 'ParamAngleX');
+    const pitch = params.find((param) => param.id === 'ParamAngleY');
+    if (yaw && pitch) {
+        for (const x of [yaw.min, yaw.max]) {
+            for (const y of [pitch.min, pitch.max]) {
+                entries.push({
+                    id: `head/${x}/${y}`, kind: 'head-corner', index: index++,
+                    assignment: { ...defaultAssignment(params), ParamAngleX: x, ParamAngleY: y },
+                });
+            }
+        }
+    }
+
     const random = mulberry32(seed);
     for (let comboIndex = 0; comboIndex < comboCount; comboIndex += 1) {
         const assignment = defaultAssignment(params);

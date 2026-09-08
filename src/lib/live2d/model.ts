@@ -1,4 +1,4 @@
-import type { ComboErrorReport, FamilyKeyforms, ScalarFamilyKeyforms } from './keyforms';
+import type { ComboErrorReport, FamilyKeyforms, JointKeyforms, ScalarFamilyKeyforms } from './keyforms';
 import type { OrderFlip } from './order';
 import type { FaceParamDefinition, FaceParamId } from './types';
 
@@ -55,6 +55,7 @@ export type Live2dModel = {
     params: Live2dParamDefinition[];
     drawables: Live2dDrawable[];
     families: Record<string, FamilyKeyforms>;
+    jointKeyforms?: JointKeyforms[];
     /** Per-drawable median depth keyforms for dynamic draw ordering. */
     depthFamilies: Record<string, ScalarFamilyKeyforms>;
     /** Median NDC depth per drawable at the neutral pose. */

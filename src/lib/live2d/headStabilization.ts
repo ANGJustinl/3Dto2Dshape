@@ -119,9 +119,12 @@ const isFeatureInsideFace = (
         return true;
     }
     const centroid = centroidOf(positions);
+    const bounds = boundsOf(positions);
     const width = Math.max(1, faceBounds.maxX - faceBounds.minX);
     const height = Math.max(1, faceBounds.maxY - faceBounds.minY);
     return (
+        bounds.maxX - bounds.minX <= width * 1.2 &&
+        bounds.maxY - bounds.minY <= height * 1.2 &&
         centroid.x >= faceBounds.minX - width * 0.08 &&
         centroid.x <= faceBounds.maxX + width * 0.08 &&
         centroid.y >= faceBounds.minY - height * 0.12 &&
@@ -168,7 +171,7 @@ export const stabilizeHeadAngleKeyforms = (
 ): Record<string, FamilyKeyforms> => {
     const faceIndex = drawables
         .map((drawable, index) => ({ drawable, index }))
-        .filter(({ drawable }) => FACE_ANCHOR_PATTERN.test(drawable.label) && !HAIR_PATTERN.test(drawable.label))
+        .filter(({ drawable }) => drawable.vertexCount > 0 && FACE_ANCHOR_PATTERN.test(drawable.label) && !HAIR_PATTERN.test(drawable.label))
         .sort((left, right) => right.drawable.vertexCount - left.drawable.vertexCount)[0]?.index;
     if (faceIndex === undefined) {
         return families;

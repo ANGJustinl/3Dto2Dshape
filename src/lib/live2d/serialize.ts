@@ -1,4 +1,4 @@
-import type { FamilyKeyforms } from './keyforms';
+import type { FamilyKeyforms, JointKeyforms } from './keyforms';
 import type { Live2dModel } from './model';
 import { createZip, parseZip, type ZipEntry } from './zip';
 
@@ -35,6 +35,7 @@ type ModelFileManifest = {
         textureWidth: number;
         textureHeight: number;
         binFile: string;
+        maskIds?: string[];
     }>;
     families: Array<{
         family: string;
@@ -43,6 +44,7 @@ type ModelFileManifest = {
         file: string;
     }>;
     neutralDepths: number[];
+    joints?: Array<{ x: JointKeyforms['x']; y: JointKeyforms['y']; file: string }>;
     depths: Array<{
         family: string;
         default: number;
@@ -116,6 +118,7 @@ export const exportModel = (
         families: [],
         neutralDepths: model.neutralDepths,
         depths: [],
+        joints: [],
     };
 
     model.drawables.forEach((drawable) => {
@@ -147,6 +150,7 @@ export const exportModel = (
             textureWidth: drawable.texture.width,
             textureHeight: drawable.texture.height,
             binFile,
+            maskIds: drawable.maskIds,
         });
     });
 
@@ -161,6 +165,15 @@ export const exportModel = (
         });
         entries.push({ name: file, data: new Uint8Array(combined.buffer) });
         manifest.families.push({ family, default: keyforms.default, values: keyforms.values, file });
+    });
+
+    (model.jointKeyforms ?? []).forEach((joint, index) => {
+        const file = `joints/${index}.bin`;
+        const combined = new Float32Array(joint.displacements.reduce((sum, block) => sum + block.length, 0));
+        let cursor = 0;
+        joint.displacements.forEach((block) => { combined.set(block, cursor); cursor += block.length; });
+        entries.push({ name: file, data: new Uint8Array(combined.buffer) });
+        manifest.joints!.push({ x: joint.x, y: joint.y, file });
     });
 
     Object.entries(model.depthFamilies ?? {}).forEach(([family, keyforms]) => {
@@ -257,6 +270,7 @@ export const verifyRoundtripBytes = (original: Live2dModel, reimported: Live2dMo
         if (drawable.renderOrder !== other.renderOrder) {
             problems.push(`${drawable.id}: render order differs`);
         }
+        if ((drawable.maskIds ?? []).join() !== (other.maskIds ?? []).join()) problems.push(`${drawable.id}: masks differ`);
     });
     Object.entries(original.families).forEach(([family, keyforms]) => {
         const other = reimported.families[family];
@@ -292,6 +306,17 @@ export const verifyRoundtripBytes = (original: Live2dModel, reimported: Live2dMo
                 problems.push(`depth family ${family} keyform ${keyformIndex}: bytes differ`);
             }
         });
+    });
+    const joints = original.jointKeyforms ?? [];
+    const otherJoints = reimported.jointKeyforms ?? [];
+    if (joints.length !== otherJoints.length) problems.push('joint keyform count differs');
+    joints.forEach((joint, index) => {
+        const other = otherJoints[index];
+        if (!other || JSON.stringify([joint.x, joint.y]) !== JSON.stringify([other.x, other.y]) ||
+            joint.displacements.length !== other.displacements.length ||
+            joint.displacements.some((block, key) => !bytesEqual(block, other.displacements[key]))) {
+            problems.push(`joint ${index}: keyforms differ`);
+        }
     });
     if ((original.neutralDepths ?? []).join() !== (reimported.neutralDepths ?? []).join()) {
         problems.push('neutral depths differ');
@@ -351,6 +376,7 @@ export const importModel = async (
                 uvs,
                 texture: { width: decoded.width, height: decoded.height, rgba: decoded.rgba },
                 renderOrder: 0,
+                maskIds: entry.maskIds,
             };
         }),
     );
@@ -383,6 +409,19 @@ export const importModel = async (
         };
     });
 
+    const packedLength = drawables.reduce((sum, drawable) => sum + drawable.vertexCount * 2, 0);
+    const jointKeyforms: JointKeyforms[] = (manifest.joints ?? []).map((entry) => {
+        const validAxis = (axis: JointKeyforms['x']) => axis.values.length >= 2 &&
+            axis.values.every((v, i) => Number.isFinite(v) && (i === 0 || v > axis.values[i - 1]));
+        const bin = files.get(entry.file)?.slice();
+        const count = entry.x.values.length * entry.y.values.length;
+        if (!validAxis(entry.x) || !validAxis(entry.y) || !bin || bin.byteLength !== count * packedLength * 4) {
+            throw new Error(`Invalid joint keyforms: ${entry.file}`);
+        }
+        return { x: entry.x, y: entry.y, displacements: Array.from({ length: count }, (_, key) =>
+            new Float32Array(bin.buffer, key * packedLength * 4, packedLength).slice()) };
+    });
+
     const depthFamilies: Live2dModel['depthFamilies'] = {};
     const drawableCount = drawables.length;
     (manifest.depths ?? []).forEach((depthEntry) => {
@@ -413,6 +452,7 @@ export const importModel = async (
         params: manifest.params,
         drawables,
         families,
+        jointKeyforms,
         depthFamilies,
         neutralDepths: manifest.neutralDepths ?? drawables.map(() => 0),
         order: manifest.order,

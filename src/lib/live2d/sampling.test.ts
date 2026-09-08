@@ -25,6 +25,11 @@ describe('face bake sampling protocol', () => {
         expect(kinds.filter((kind) => kind === 'neutral')).toHaveLength(1);
         expect(kinds.filter((kind) => kind === 'family-sweep')).toHaveLength(13 * 3 + 9 * 3);
         expect(kinds.filter((kind) => kind === 'combo-qa')).toHaveLength(10);
+        const corners = plan.filter((entry) => entry.kind === 'head-corner');
+        expect(corners.map((entry) => [entry.assignment.ParamAngleX, entry.assignment.ParamAngleY])).toEqual([
+            [-30, -30], [-30, 30], [30, -30], [30, 30],
+        ]);
+        expect(corners.every((entry) => entry.assignment.ParamEyeLOpen === 1 && entry.assignment.ParamMouthOpenY === 0)).toBe(true);
 
         const firstSweepIndex = kinds.indexOf('family-sweep');
         expect(kinds.slice(firstSweepIndex, firstSweepIndex + 13).every((kind) => kind === 'family-sweep')).toBe(true);

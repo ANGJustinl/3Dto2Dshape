@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { createPoseEvaluator, type PoseEvaluator } from './keyforms';
 import type { Live2dModel } from './model';
 import type { FaceParamId, ParamAssignment } from './types';
+import { renderMaskedMeshes } from './stencilRendering';
 
 /**
  * M4: interactive preview runtime. One textured mesh per drawable in an
@@ -11,16 +12,6 @@ import type { FaceParamId, ParamAssignment } from './types';
  * stay pinned to the neutral crop window, which is what makes the texture
  * follow the deformation.
  */
-const scratchScene = new THREE.Scene();
-
-const scratchSceneFor = (meshes: THREE.Mesh[]): THREE.Scene => {
-    scratchScene.clear();
-    meshes.forEach((mesh) => scratchScene.add(mesh));
-    return scratchScene;
-};
-
-const material0 = (meshes: THREE.Mesh[]): THREE.MeshBasicMaterial | undefined =>
-    meshes[0]?.material as THREE.MeshBasicMaterial | undefined;
 
 export class Live2dPreviewRuntime {
     private readonly renderer: THREE.WebGLRenderer;
@@ -32,7 +23,6 @@ export class Live2dPreviewRuntime {
         maskerMesh: THREE.Mesh;
         maskedMeshes: THREE.Mesh[];
         stencilWriteMaterial: THREE.MeshBasicMaterial;
-        stencilTestMaterial: THREE.MeshBasicMaterial;
     }> = [];
     private readonly drawables: Live2dModel['drawables'];
     private readonly outputs: Float32Array[];
@@ -87,7 +77,7 @@ export class Live2dPreviewRuntime {
         });
 
         const neutralPositions = model.drawables.map((drawable) => drawable.neutralPositions);
-        this.evaluator = createPoseEvaluator(model.drawables, neutralPositions, model.families);
+        this.evaluator = createPoseEvaluator(model.drawables, neutralPositions, model.families, model.jointKeyforms);
 
         model.drawables.forEach((drawable) => {
             const positions = new Float32Array(drawable.vertexCount * 3);
@@ -157,11 +147,8 @@ export class Live2dPreviewRuntime {
             stencilWriteMaterial.stencilRef = 1;
             stencilWriteMaterial.stencilFunc = THREE.AlwaysStencilFunc;
             stencilWriteMaterial.stencilZPass = THREE.ReplaceStencilOp;
-            const stencilTestMaterial = (material0(maskedMeshes))!.clone();
-            stencilTestMaterial.stencilWrite = true;
-            stencilTestMaterial.stencilRef = 1;
-            stencilTestMaterial.stencilFunc = THREE.EqualStencilFunc;
-            this.maskGroups.push({ maskerMesh, maskedMeshes, stencilWriteMaterial, stencilTestMaterial });
+            stencilWriteMaterial.alphaTest = 0.01;
+            this.maskGroups.push({ maskerMesh, maskedMeshes, stencilWriteMaterial });
         });
 
         this.render();
@@ -226,33 +213,12 @@ export class Live2dPreviewRuntime {
 
         // Cubism masking: masked drawables render only inside their maskers'
         // opaque area (stencil buffer).
-        const maskedSet = new Set<THREE.Mesh>();
-        this.maskGroups.forEach((group) => group.maskedMeshes.forEach((mesh) => maskedSet.add(mesh)));
-        const unmasked = this.scene.children.filter(
-            (child): child is THREE.Mesh => child instanceof THREE.Mesh && !maskedSet.has(child),
-        );
-        unmasked.sort((left, right) => left.renderOrder - right.renderOrder);
-        this.renderer.clear(true, true, true);
-        this.renderer.render(
-            unmasked.length === this.scene.children.length ? this.scene : scratchSceneFor(unmasked),
-            this.camera,
-        );
-        this.maskGroups.forEach((group) => {
-            const maskerMaterial = group.maskerMesh.material as THREE.MeshBasicMaterial;
-            group.maskerMesh.material = group.stencilWriteMaterial;
-            this.renderer.render(group.maskerMesh, this.camera);
-            group.maskerMesh.material = maskerMaterial;
-            group.maskedMeshes.forEach((mesh) => {
-                const material = mesh.material as THREE.MeshBasicMaterial;
-                mesh.material = group.stencilTestMaterial;
-                this.renderer.render(mesh, this.camera);
-                mesh.material = material;
-            });
-            this.renderer.render(group.maskerMesh, this.camera);
-        });
+        renderMaskedMeshes(this.renderer, this.camera,
+            this.neutralOrder.map((index) => this.meshes[index]), this.maskGroups);
     }
 
     dispose() {
+        this.maskGroups.forEach((group) => group.stencilWriteMaterial.dispose());
         this.meshes.forEach((mesh) => {
             const material = mesh.material as THREE.MeshBasicMaterial;
             material.map?.dispose();

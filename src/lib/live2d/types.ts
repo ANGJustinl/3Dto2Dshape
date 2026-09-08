@@ -71,7 +71,7 @@ export type BakeMeshSample = {
     vertices: BakeVertexSample;
 };
 
-export type BakeSampleKind = 'neutral' | 'family-sweep' | 'combo-qa';
+export type BakeSampleKind = 'neutral' | 'family-sweep' | 'head-corner' | 'combo-qa';
 
 export type BakeSample = {
     id: string;

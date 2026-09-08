@@ -64,6 +64,23 @@ const makeShape = (stableId: string, x: number): ProjectedPartShape => ({
 });
 
 describe('shape tracking', () => {
+    it('does not inherit the identity of another nearby body part', () => {
+        const tracker = new ShapeTrackState();
+        tracker.stabilize([makeShape('old', 20)], settings, 1, 100, 100);
+        const shape = { ...makeShape('new', 21), sourceLeafId: 'different-part' };
+        expect(tracker.stabilize([shape], settings, 2, 100, 100)[0]).toBe(shape);
+    });
+
+    it('reduces small contour jitter while preserving a cyclic vertex order', () => {
+        const tracker = new ShapeTrackState();
+        tracker.stabilize([makeShape('old', 20)], settings, 1, 100, 100);
+        const next = makeShape('new', 20);
+        next.loops[0][0].x += 0.5;
+        next.loops[0].push(next.loops[0].shift()!);
+        const result = tracker.stabilize([next], settings, 2, 100, 100)[0];
+        expect(result.loops[0][3].x).toBeGreaterThan(15);
+        expect(result.loops[0][3].x).toBeLessThan(15.5);
+    });
     it('keeps the stable id and smooths small motion', () => {
         const tracker = new ShapeTrackState();
         tracker.stabilize([makeShape('source::base::1:1', 20)], settings, 1, 100, 100);

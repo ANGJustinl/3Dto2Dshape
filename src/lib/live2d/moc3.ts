@@ -278,7 +278,9 @@ const keyValuesForParam = (
 ) => {
     const param = model.params[paramIndex];
     if (param.id === 'ParamAngleX' || param.id === 'ParamAngleY' || param.id === 'ParamAngleZ') {
-        return [...new Set([...angleKeys, param.default])].sort((left, right) => left - right);
+        const jointKeys = (model.jointKeyforms ?? []).flatMap((joint) =>
+            [joint.x, joint.y].filter((axis) => axis.family === param.id).flatMap((axis) => axis.values));
+        return [...new Set([...angleKeys, param.default, ...jointKeys])].sort((left, right) => left - right);
     }
     const keyforms = model.families[param.id];
     const values = keyforms
@@ -378,9 +380,23 @@ export const buildMoc3 = (
             .filter((candidate) => candidate.magnitude > relevance)
             .sort((left, right) => right.magnitude - left.magnitude);
 
-        const parameterIndices: number[] = [];
-        let product = 1;
+        // Reserve both joint axes, including motion absent from axial sweeps.
+        const required = new Set<number>();
+        for (const joint of model.jointKeyforms ?? []) {
+            const start = displacementOffsets[drawableIndex];
+            const end = start + drawable.vertexCount * 2;
+            if (!joint.displacements.some((block) => block.subarray(start, end).some((v) => Math.abs(v) > 1e-5))) continue;
+            for (const axis of [joint.x, joint.y]) {
+                const index = model.params.findIndex((param) => param.id === axis.family);
+                if (index < 0) throw new Error(`Missing joint parameter ${axis.family}`);
+                required.add(index);
+            }
+        }
+        const parameterIndices: number[] = [...required];
+        let product = parameterIndices.reduce((count, index) => count * keyValuesByParamIndex[index].length, 1);
+        if (product > MAX_KEYFORMS_PER_ARTMESH) throw new Error('Joint parameter grid exceeds export budget.');
         candidates.forEach((candidate) => {
+            if (required.has(candidate.paramIndex)) return;
             const keyCount = keyValuesByParamIndex[candidate.paramIndex].length;
             if (product * keyCount > MAX_KEYFORMS_PER_ARTMESH) {
                 return; // over budget: this and every weaker param stays static
@@ -749,7 +765,7 @@ export const buildMoc3 = (
     const halfHeight = model.viewport.height / 2;
     const pixelsPerUnit = model.viewport.width;
     const neutralPositions = model.drawables.map((drawable) => drawable.neutralPositions);
-    const poseEvaluator = createPoseEvaluator(model.drawables, neutralPositions, model.families);
+    const poseEvaluator = createPoseEvaluator(model.drawables, neutralPositions, model.families, model.jointKeyforms);
     const poseOutputs = model.drawables.map((drawable) => new Float32Array(drawable.vertexCount * 2));
     setSlot(
         SLOT.kfPos,
