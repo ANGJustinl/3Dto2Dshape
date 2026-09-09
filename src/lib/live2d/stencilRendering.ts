@@ -42,7 +42,7 @@ export function renderMaskedMeshes(
             };
             material.stencilWrite = true;
             material.stencilRef = 1;
-            material.stencilFunc = THREE.EqualStencilFunc;
+            material.stencilFunc = mesh.userData.invertedMask ? THREE.NotEqualStencilFunc : THREE.EqualStencilFunc;
             try {
                 renderer.render(mesh, camera);
             } finally {

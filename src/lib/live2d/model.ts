@@ -45,6 +45,7 @@ export type Live2dDrawable = {
      * maskers' rendered area is clipped. Empty = unmasked.
      */
     maskIds?: string[];
+    invertedMask?: boolean;
 };
 
 export type Live2dModel = {

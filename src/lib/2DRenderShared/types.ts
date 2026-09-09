@@ -93,6 +93,10 @@ export type ProjectionPartStyleOverride = {
 };
 
 export type ProjectedPartShape = {
+    /** Realtime display override only; not applied by the bake/export path. */
+    previewFlatInk?: boolean;
+    /** Material alpha, separate from the global overlay opacity. */
+    opacity?: number;
     leafId: string;
     sourceLeafId: string;
     paintLayer: PaintLayerKind;

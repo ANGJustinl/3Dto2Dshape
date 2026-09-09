@@ -23,7 +23,7 @@ describe('face bake sampling protocol', () => {
 
         const kinds = plan.map((entry) => entry.kind);
         expect(kinds.filter((kind) => kind === 'neutral')).toHaveLength(1);
-        expect(kinds.filter((kind) => kind === 'family-sweep')).toHaveLength(13 * 3 + 9 * 3);
+        expect(kinds.filter((kind) => kind === 'family-sweep')).toHaveLength(13 * 3 + 9 * 3 + 5);
         expect(kinds.filter((kind) => kind === 'combo-qa')).toHaveLength(10);
         const corners = plan.filter((entry) => entry.kind === 'head-corner');
         expect(corners.map((entry) => [entry.assignment.ParamAngleX, entry.assignment.ParamAngleY])).toEqual([

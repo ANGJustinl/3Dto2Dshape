@@ -79,6 +79,14 @@ const makeShape = (
 });
 
 describe('screen-space shape composition', () => {
+    it('preserves matching alpha and never merges opaque and translucent shapes', () => {
+        const left = {...makeShape('left', rectangle(4,4,12,16), '#808080', 'support', 0, [0,0,1], 'shared'), opacity:0.3};
+        const right = {...makeShape('right', rectangle(12,4,20,16), '#808080', 'support', 0, [0,0,1], 'shared'), opacity:0.3};
+        const merged = composeProjectedShapes([left,right], [], settings, 32,24);
+        expect(merged).toHaveLength(1);
+        expect(merged[0].opacity).toBe(0.3);
+        expect(composeProjectedShapes([left,{...right,opacity:1}], [], settings,32,24)).toHaveLength(2);
+    });
     it('merges adjacent same-color shapes into one large shape', () => {
         const result = composeProjectedShapes(
             [

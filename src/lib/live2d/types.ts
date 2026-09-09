@@ -15,7 +15,8 @@ export type FaceParamId =
     | 'ParamAngleZ'
     | 'ParamEyeLOpen'
     | 'ParamEyeROpen'
-    | 'ParamMouthOpenY';
+    | 'ParamMouthOpenY'
+    | 'ParamMouthForm';
 
 export type ParamAxis = 'x' | 'y' | 'z';
 
@@ -36,6 +37,8 @@ export type FaceParamSource =
           morphNames: string[];
           /** 'inverse': influence = 1 - value (open-1..closed-0 params drive wink morphs). */
           valueMap: 'direct' | 'inverse';
+          /** Amplification for subtle source expressions; parameter range is unchanged. */
+          influenceScale?: number;
       };
 
 export type FaceParamDefinition = {
@@ -58,7 +61,7 @@ export type ResolvedFaceParam = FaceParamDefinition & {
 };
 
 /** Complete assignment: every param carries an explicit value. */
-export type ParamAssignment = Record<FaceParamId, number>;
+export type ParamAssignment = Record<Exclude<FaceParamId, 'ParamMouthForm'>, number> & { ParamMouthForm?: number };
 
 export type BakeVertexSample = {
     screenX: Float32Array;
@@ -110,5 +113,5 @@ export type BakeBundle = {
 export const bakeAssignmentKey = (assignment: ParamAssignment) =>
     (Object.keys(assignment) as FaceParamId[])
         .sort()
-        .map((key) => `${key}=${assignment[key].toFixed(4)}`)
+        .map((key) => `${key}=${(assignment[key] ?? 0).toFixed(4)}`)
         .join('|');

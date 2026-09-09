@@ -36,6 +36,7 @@ type ModelFileManifest = {
         textureHeight: number;
         binFile: string;
         maskIds?: string[];
+        invertedMask?: boolean;
     }>;
     families: Array<{
         family: string;
@@ -151,6 +152,7 @@ export const exportModel = (
             textureHeight: drawable.texture.height,
             binFile,
             maskIds: drawable.maskIds,
+            invertedMask: drawable.invertedMask,
         });
     });
 
@@ -271,6 +273,7 @@ export const verifyRoundtripBytes = (original: Live2dModel, reimported: Live2dMo
             problems.push(`${drawable.id}: render order differs`);
         }
         if ((drawable.maskIds ?? []).join() !== (other.maskIds ?? []).join()) problems.push(`${drawable.id}: masks differ`);
+        if (!!drawable.invertedMask !== !!other.invertedMask) problems.push(`${drawable.id}: mask inversion differs`);
     });
     Object.entries(original.families).forEach(([family, keyforms]) => {
         const other = reimported.families[family];
@@ -377,6 +380,7 @@ export const importModel = async (
                 texture: { width: decoded.width, height: decoded.height, rgba: decoded.rgba },
                 renderOrder: 0,
                 maskIds: entry.maskIds,
+                invertedMask: entry.invertedMask,
             };
         }),
     );

@@ -22,7 +22,7 @@ const family = (id: 'ParamAngleX' | 'ParamAngleY', displacement: number[]): Fami
 });
 
 describe('head angle stabilization', () => {
-    it('stabilizes front hair at yaw without erasing facial turn cues', () => {
+    it('keeps eyes and front hair on the same face transform during yaw', () => {
         const drawables = [drawable('D颜', 4), drawable('D目', 2), drawable('D前髪', 2)];
         const neutral = [
             Float32Array.from([-1, -1, 1, -1, -1, 1, 1, 1]),
@@ -30,8 +30,8 @@ describe('head angle stabilization', () => {
             Float32Array.from([-1, -2, 1, -2]),
         ];
         const raw = [
-            // Face translates by (+5,+2); eye keeps its turn cue while the
-            // bangs contain a bad crossing displacement.
+            // Face translates by (+5,+2); eye and bangs contain crossing
+            // displacements that must not survive the shared face transform.
             5, 2, 5, 2, 5, 2, 5, 2,
             15, 2, 15, 2,
             -4, 2, -4, 2,
@@ -42,7 +42,7 @@ describe('head angle stabilization', () => {
         const output = stabilized.ParamAngleX.displacements[0];
 
         expect([...output.slice(0, 8)]).toEqual(raw.slice(0, 8));
-        expect([...output.slice(8, 12)]).toEqual([15, 2, 15, 2]);
+        expect([...output.slice(8, 12)]).toEqual([5, 2, 5, 2]);
         expect([...output.slice(12, 16)]).toEqual([5, 2, 5, 2]);
     });
 

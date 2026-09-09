@@ -126,7 +126,8 @@ export class FacePoseDriver {
                     ? 1 - value
                     : value;
             if (this.mesh.morphTargetInfluences) {
-                this.mesh.morphTargetInfluences[param.resolved.morphIndex] = influence;
+                this.mesh.morphTargetInfluences[param.resolved.morphIndex] = influence *
+                    (param.source.kind === 'morph' ? param.source.influenceScale ?? 1 : 1);
             }
         });
 

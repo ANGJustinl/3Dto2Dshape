@@ -68,6 +68,8 @@ export type ProjectionTriangleSource = {
 };
 
 export type ProjectionPartSource = {
+    /** Original material alpha; undefined means opaque for legacy sources. */
+    opacity?: number;
     leafId: string;
     label: string;
     materialNames: string[];
@@ -1212,6 +1214,7 @@ const buildMeshSegmentation = (
                 });
                 if (cluster.triangles.length >= 1) {
                     projectionParts.push({
+                        opacity: material.opacity,
                         leafId,
                         label: materialName,
                         materialNames: [materialName],

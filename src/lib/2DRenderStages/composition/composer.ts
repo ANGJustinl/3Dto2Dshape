@@ -1,6 +1,7 @@
 import type { GpuDepthAtlasState } from '../partRasterization/rasterizer';
 import type { ProjectedPartShape, ProjectionOverlaySettings } from '../../2DRenderShared/types';
 import { recordPerfSample } from '../../perfLogger';
+import { shapeAlpha } from '../../2DRenderShared/opacity';
 import { getSharedWebGpuContext } from '../../webgpuShared';
 
 type GPUCanvasContextLike = any;
@@ -18,6 +19,8 @@ type ShapeBounds = {
 };
 
 type PreparedShape = {
+    previewFlatInk: boolean;
+    opacity: number;
     color: [number, number, number, number];
     bounds: ShapeBounds;
     rasterBounds: {
@@ -141,7 +144,9 @@ const buildPreparedShape = (
 
     const flattenedLoops = flattenLoops(shape);
     return {
-        color: hexToRgba(shape.color, settings.opacity),
+        previewFlatInk: shape.previewFlatInk ?? false,
+        opacity: shapeAlpha(shape.opacity, 1),
+        color: shape.previewFlatInk ? [0, 0, 0, 1] : hexToRgba(shape.color, shapeAlpha(shape.opacity, settings.opacity)),
         bounds,
         rasterBounds: shape.rasterBounds,
         atlasRegion: shape.atlasRegion,
@@ -765,7 +770,7 @@ fn fragmentMain(input: VertexOutput) -> FragmentOutput {
                 shape.orientedBounds.axisY.x,
                 shape.orientedBounds.axisY.y,
                  ...shape.color,
-                 ...hexToRgba(settings.outlineColor, settings.outlineOpacity),
+                 ...(shape.previewFlatInk ? [0, 0, 0, 1] : hexToRgba(settings.outlineColor, shapeAlpha(shape.opacity, settings.outlineOpacity))),
                 shape.depthSource === 'constant' ? 1 : 0,
                 shape.depth,
                 0,

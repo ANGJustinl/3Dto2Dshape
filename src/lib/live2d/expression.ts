@@ -45,11 +45,11 @@ export const applyExpression = (
         }
         const id = parameter.id as FaceParamId;
         if (parameter.blend === 'overwrite') {
-            next[id] = parameter.value * weight + base[id] * (1 - weight);
+            next[id] = parameter.value * weight + (base[id] ?? 0) * (1 - weight);
         } else if (parameter.blend === 'multiply') {
-            next[id] = base[id] * (1 + (parameter.value - 1) * weight);
+            next[id] = (base[id] ?? 0) * (1 + (parameter.value - 1) * weight);
         } else {
-            next[id] = base[id] + parameter.value * weight;
+            next[id] = (base[id] ?? 0) + parameter.value * weight;
         }
     });
     return next;

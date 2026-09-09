@@ -117,6 +117,7 @@ export class Live2dPreviewRuntime {
                 depthWrite: false,
             });
             const mesh = new THREE.Mesh(geometry, material);
+            mesh.userData.invertedMask = drawable.invertedMask ?? false;
             mesh.renderOrder = drawable.renderOrder;
             mesh.frustumCulled = false;
             this.scene.add(mesh);

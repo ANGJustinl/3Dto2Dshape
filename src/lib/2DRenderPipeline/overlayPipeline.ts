@@ -9,6 +9,7 @@ import { shapeProjectedParts } from '../2DRenderStages/partShaping';
 import { composeProjectedShapes } from '../2DRenderStages/partShaping/shapeComposition';
 import { ShapeTrackState } from './shapeTracking';
 import { getStyleModeDefaults } from '../2DRenderShared/focusResolver';
+import { previewEyeShadow } from './previewEyeShadow';
 
 type RenderJob = {
     root: THREE.Object3D | null;
@@ -272,7 +273,7 @@ export class OverlayRenderPipeline {
                 const composeStart = performance.now();
                 await compose2DRenderOverlay(
                     canvas,
-                    filteredShapes,
+                    previewEyeShadow(filteredShapes, job.parts),
                     job.viewportWidth,
                     job.viewportHeight,
                     job.settings,

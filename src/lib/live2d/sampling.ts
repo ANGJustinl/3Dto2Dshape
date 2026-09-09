@@ -24,6 +24,7 @@ const DEFAULT_SWEEP_STEPS: Record<FaceParamId, number> = {
     ParamEyeLOpen: 0.125,
     ParamEyeROpen: 0.125,
     ParamMouthOpenY: 0.125,
+    ParamMouthForm: 0.25,
 };
 
 export const mulberry32 = (seed: number) => {

@@ -210,12 +210,13 @@ export const stabilizeHeadAngleKeyforms = (
                             const isFeature = isFeatureInsideFace(drawable, neutral, faceBounds);
 
                             if (isFace) {
-                                if (!isYaw) {
-                                    writeStabilizedDrawable(output, raw, offset, neutral, transform, () => 0);
-                                }
+                                // The baked texture is a front projection, not a UV skin.
+                                // Rotating its rear surface through the visible face folds
+                                // the same pixels over eyes and mouth. Keep one shared 2D rig.
+                                writeStabilizedDrawable(output, raw, offset, neutral, transform, () => 0);
                                 return;
                             }
-                            if (isFrontHair || (!isYaw && isFeature)) {
+                            if (isFrontHair || isFeature) {
                                 writeStabilizedDrawable(output, raw, offset, neutral, transform, () => 0);
                                 return;
                             }

@@ -38,7 +38,7 @@ import { createZip, type ZipEntry } from './zip';
 const SLOT_COUNT = 101;
 const DATA_START = 0x7c0;
 /** Per-artmesh tensor budget: 3^5 keyforms with default 3-key grids. */
-const MAX_KEYFORMS_PER_ARTMESH = 512;
+const MAX_KEYFORMS_PER_ARTMESH = 2187;
 
 /** Flattened slot indices (version 1 declaration order, spec-verified). */
 const SLOT = {
@@ -286,7 +286,10 @@ const keyValuesForParam = (
     const values = keyforms
         ? subsampleKeys(keyforms.values, param.default, maxMorphKeys)
         : [param.min, param.max];
-    return [...new Set([...values, param.default])].sort((left, right) => left - right);
+    // Mouth combinations need their half-open key even without an axial family.
+    const jointKeys = (model.jointKeyforms ?? []).flatMap(joint =>
+        [joint.x, joint.y].filter(axis => axis.family === param.id).flatMap(axis => axis.values));
+    return [...new Set([...values, param.default, ...jointKeys])].sort((left, right) => left - right);
 };
 
 export type Moc3BuildResult = {
@@ -382,6 +385,14 @@ export const buildMoc3 = (
 
         // Reserve both joint axes, including motion absent from axial sweeps.
         const required = new Set<number>();
+        // Expression controls must not lose to larger head movements or the
+        // whole-face relevance threshold. Six three-key axes require 729 cells.
+        model.params.forEach((param, index) => {
+            if ((param.id === 'ParamMouthOpenY' || param.id === 'ParamMouthForm') &&
+                familyMotionMagnitude(model, drawableIndex, displacementOffsets, param.id) > 1e-5) {
+                required.add(index);
+            }
+        });
         for (const joint of model.jointKeyforms ?? []) {
             const start = displacementOffsets[drawableIndex];
             const end = start + drawable.vertexCount * 2;
@@ -468,7 +479,7 @@ export const buildMoc3 = (
         maskCounts.push(maskerIndices.length);
         maskerIndices.forEach((maskerIndex) => maskPool.push(maskerIndex));
         if (maskerIndices.length > 0) {
-            maskedFlags[index] = 4 | 0x08;
+            maskedFlags[index] = 4 | (drawable.invertedMask ? 0x08 : 0);
         }
     });
     const totalMaskIndices = maskPool.length;

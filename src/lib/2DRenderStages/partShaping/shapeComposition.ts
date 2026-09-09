@@ -133,6 +133,9 @@ const canMergeShapes = (
     if (left.paintLayer !== right.paintLayer) {
         return false;
     }
+    // A merged polygon carries one alpha: never replace translucent ink with
+    // a neighbouring opaque material, even when their RGB colors match.
+    if (Math.abs((left.opacity ?? 1) - (right.opacity ?? 1)) > 1e-6) return false;
     // Cross-source depth is only safe when the caller explicitly asks for a
     // permissive outer-only merge. The default depth/normal guards keep source
     // parts isolated, preventing the face atlas from being replaced by a

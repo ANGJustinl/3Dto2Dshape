@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { frameFrontCamera } from './frontCamera';
 import type { MeshProjectionCache } from '../2DRenderShared/types';
 import type { ProjectionPartSource } from '../modelParts';
 import { resolveFaceParams } from './paramMapping';
@@ -129,6 +130,7 @@ export const collectBakeSamples = async (args: CollectSamplesArgs): Promise<Bake
     const driver = new FacePoseDriver(mesh, params, root);
     const snapshot = driver.snapshot();
     driver.applyNeutral();
+    frameFrontCamera(bakeCamera, root);
 
     const samples: BakeSample[] = [];
     try {

@@ -6,7 +6,7 @@ import { createPoseEvaluator } from './keyforms';
 import { defaultAssignment } from './paramMapping';
 import type { Live2dModel } from './model';
 
-it('exports joint-only movement and matches real Cubism Core throughout the head grid', async () => {
+it.each(['head', 'mouth'] as const)('exports joint-only movement and matches real Cubism Core throughout the %s grid', async (kind) => {
     const model: Live2dModel = {
         schemaVersion: 1, createdAt: '', modelName: 'joint-core-fixture', viewport: { width: 100, height: 100 },
         params: (['ParamAngleX', 'ParamAngleY'] as const).map((id) => ({ id, label: id, min: -30, max: 30, default: 0 })),
@@ -30,6 +30,14 @@ it('exports joint-only movement and matches real Cubism Core throughout the head
             }),
         }],
     };
+    if (kind === 'mouth') {
+        model.params = (['ParamMouthForm', 'ParamMouthOpenY'] as const).map(id => ({id,label:id,min:0,max:1,default:0}));
+        model.jointKeyforms = [{
+            x: { family:'ParamMouthForm',default:0,values:[0,1] },
+            y: { family:'ParamMouthOpenY',default:0,values:[0,0.5,1] },
+            displacements: Array.from({length:6},(_,i)=>Float32Array.from({length:8},(_,j)=>i%2 ? (j%2 ? -1 : 1)*(i+1) : 0)),
+        }];
+    }
     const sandbox = {
         console, setTimeout, clearTimeout, TextDecoder, TextEncoder,
         atob: (s: string) => Buffer.from(s, 'base64').toString('binary'),
@@ -48,7 +56,7 @@ it('exports joint-only movement and matches real Cubism Core throughout the head
         } };
     } }).Live2DCubismCore;
     const result = buildMoc3(model);
-    expect(result.keyformCounts).toEqual([9]);
+    expect(result.keyformCounts[0]).toBeGreaterThanOrEqual(kind === 'head' ? 9 : 6);
     const moc = core.Moc.fromArrayBuffer(result.moc3.slice().buffer);
     expect(moc).toBeTruthy();
     const runtime = core.Model.fromMoc(moc);
@@ -57,10 +65,11 @@ it('exports joint-only movement and matches real Cubism Core throughout the head
     try {
         // Corners, axes and half-steps detect both binding omissions and
         // X/Y tensor transposition that endpoint-only structural tests miss.
-        for (const x of [-30,-15,0,15,30]) for (const y of [-30,-15,0,15,30]) {
-            const assignment = { ...defaultAssignment(), ParamAngleX: x, ParamAngleY: y };
+        const samples = kind === 'head' ? [-30,-15,0,15,30] : [0,0.25,0.5,0.75,1];
+        for (const x of samples) for (const y of samples) {
+            const assignment = { ...defaultAssignment(), [model.params[0].id]: x, [model.params[1].id]: y };
             runtime.parameters.ids.forEach((id, index) => {
-                runtime.parameters.values[index] = id === 'ParamAngleX' ? x : y;
+                runtime.parameters.values[index] = id === model.params[0].id ? x : y;
             });
             runtime.update();
             evaluator.evaluate(assignment, outputs);

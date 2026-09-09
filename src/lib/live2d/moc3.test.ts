@@ -297,7 +297,10 @@ describe('moc3 writer structure', () => {
         expect(read.s32(read.slot(SLOT.masks))).toBe(0);
         // body unmasked; head carries flag 4 | 0x08.
         expect(moc3[read.slot(SLOT.amFlags)]).toBe(4);
-        expect(moc3[read.slot(SLOT.amFlags) + 1]).toBe(12);
+        expect(moc3[read.slot(SLOT.amFlags) + 1]).toBe(4);
+        model.drawables[1].invertedMask = true;
+        const inverted = buildMoc3(model).moc3;
+        expect(inverted[buildReader(inverted).slot(SLOT.amFlags) + 1]).toBe(12);
         // count table row 17 (drawable masks) = 1 pool entry.
         expect(read.u32(read.slot(SLOT.countInfo) + 17 * 4)).toBe(1);
     });
@@ -371,7 +374,7 @@ describe('moc3 keyform budget', () => {
         new Float32Array([0, 0, 0, 0, 0, 0, headDx, 0, headDx, 0, headDx, 0, headDx, 0]);
     const sweep = (steps: number) => Array.from({ length: steps }, (_, index) => index / (steps - 1));
 
-    it('subsamples morph keys and drops the weakest params over budget', () => {
+    it('preserves mouth movement alongside all five other controls', () => {
         const model = buildFixtureModel();
         // Head moves under all 6 params with distinct magnitudes; 3^6 grids
         // would be 729 keyforms, so the weakest (Mouth, 2px) must drop.
@@ -387,16 +390,16 @@ describe('moc3 keyform budget', () => {
         const read = buildReader(moc3);
 
         // body: 1 keyform; head: 5 params x 3 keys = 243 (Mouth dropped).
-        expect(keyformCounts).toEqual([3, 243]);
+        expect(keyformCounts).toEqual([3, 729]);
 
         const counts = read.slot(SLOT.countInfo);
-        expect(read.u32(counts + 9 * 4)).toBe(246); // art mesh keyforms (body 3 + head 243)
-        expect(read.u32(counts + 10 * 4)).toBe(3936); // 246 rows x 16-float padded stride
-        expect(read.u32(counts + 13 * 4)).toBe(5); // parameter bindings (one per bound param)
+        expect(read.u32(counts + 9 * 4)).toBe(732);
+        expect(read.u32(counts + 10 * 4)).toBe(11712);
+        expect(read.u32(counts + 13 * 4)).toBe(6);
 
         // MouthOpenY (param 5) binds nothing; EyeL still binds one.
         const pbsc = read.slot(SLOT.paramsPbsc);
-        expect(read.s32(pbsc + 4 * 5)).toBe(0);
+        expect(read.s32(pbsc + 4 * 5)).toBe(1);
         expect(read.s32(pbsc + 4 * 3)).toBe(1);
 
         // EyeL is the 4th binding (0-based 3): its keys subsample to 3

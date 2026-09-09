@@ -44,7 +44,7 @@ const getTriangleShade = (
     return normal.dot(lightDirection);
 };
 
-const buildPaintLayerParts = (
+export const buildPaintLayerParts = (
     part: ProjectionPartSource,
     projectionCache: MeshProjectionCache,
     settings: ProjectionOverlaySettings,
@@ -52,10 +52,14 @@ const buildPaintLayerParts = (
 ) => {
     const lightDirection = new THREE.Vector3(...settings.lightDirection).normalize();
     const trianglesByLayer = new Map<ReturnType<typeof getPaintLayerForShade>, ProjectionPartSource['triangles']>();
+    // Painted eye shadow already encodes the intended shading. Re-lighting its
+    // deforming triangles causes discrete color jumps during turns and blinks.
+    const fixedEyeShadow = [part.label, ...part.materialNames].some(name =>
+        /^(目影|眼影|eye[ _-]?shadow)(?:$|[\s_.-])/i.test(name.trim()));
 
     part.triangles.forEach((triangle) => {
-        const shade = getTriangleShade(projectionCache, triangle.vertexIndices, lightDirection);
-        const layer = getPaintLayerForShade(shade, settings);
+        const layer = fixedEyeShadow ? 'base' : getPaintLayerForShade(
+            getTriangleShade(projectionCache, triangle.vertexIndices, lightDirection), settings);
         const layerTriangles = trianglesByLayer.get(layer) ?? [];
         layerTriangles.push(triangle);
         trianglesByLayer.set(layer, layerTriangles);
@@ -80,7 +84,7 @@ const buildPaintLayerParts = (
             accentScore: resolvedStyle.accentScore,
             connectivityRole: resolvedStyle.connectivityRole,
             triangleCount: triangles.length,
-            color: shadeColorForLayer(part.color, paintLayer, settings),
+            color: fixedEyeShadow ? part.color : shadeColorForLayer(part.color, paintLayer, settings),
             triangles,
         });
     });

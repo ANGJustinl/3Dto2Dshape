@@ -5,10 +5,14 @@ import type { FaceParamDefinition, ParamAssignment, ResolvedFaceParam } from './
  * MMD -> Live2D standard face parameter mapping, in the spirit of
  * MIXAMO_TO_TARGET_CANDIDATES: candidate chains with graceful degradation.
  * Bones rotate in their parent space on top of the neutral pose; morphs write
- * morphTargetInfluences directly. MouthForm (い/う/え/お) is deliberately out
- * of scope: MMD vowel morphs are not a 1D blend of ParamMouthForm.
+ * morphTargetInfluences directly. MouthForm maps neutral-to-smile; vowel
+ * morphs are deliberately not substituted for a smile expression.
  */
 export const FACE_PARAM_DEFINITIONS: FaceParamDefinition[] = [
+    {
+        id: 'ParamMouthForm', label: 'Mouth smile', min: 0, max: 1, default: 0,
+        source: { kind: 'morph', morphNames: ['にやり', 'にっこり', '口角上げ', 'Smile', 'smile', '微笑'], valueMap: 'direct' },
+    },
     {
         id: 'ParamAngleX',
         label: 'Head yaw',

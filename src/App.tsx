@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
+import { frameFrontCamera } from './lib/live2d/frontCamera';
 import { MMDAnimationHelper } from 'three/examples/jsm/animation/MMDAnimationHelper.js';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { MMDLoader } from 'three/examples/jsm/loaders/MMDLoader.js';
@@ -785,8 +786,7 @@ function App() {
 
                 scene.add(currentModel);
                 scheduleSegmentation(currentModel);
-                controls.target.set(0, size.y * 0.45, 0);
-                camera.position.set(size.x * 0.7, size.y * 0.75, size.z * 2.6 + 8);
+                controls.target.copy(frameFrontCamera(camera, currentModel));
                 controls.update();
 
                 const targetMesh = currentModel.getObjectByProperty('isSkinnedMesh', true) as THREE.SkinnedMesh | undefined;

@@ -65,12 +65,12 @@ export const buildFamilyKeyforms = (
         const sweepSamples = bundle.samples
             .filter((sample) => sample.family === family)
             .sort((left, right) => {
-                const leftValue = left.assignment[family];
-                const rightValue = right.assignment[family];
+                const leftValue = left.assignment[family] ?? 0;
+                const rightValue = right.assignment[family] ?? 0;
                 return leftValue - rightValue;
             });
 
-        const values = sweepSamples.map((sample) => sample.assignment[family]);
+        const values = sweepSamples.map((sample) => sample.assignment[family] ?? 0);
         const displacements = sweepSamples.map((sample, keyformIndex) => {
             const packed = new Float32Array(
                 drawables.reduce((total, drawable) => total + drawable.vertexCount * 2, 0),
@@ -383,9 +383,9 @@ export const buildDepthKeyforms = (
     familyIds.forEach((family) => {
         const sweepSamples = bundle.samples
             .filter((sample) => sample.family === family)
-            .sort((left, right) => left.assignment[family] - right.assignment[family]);
+            .sort((left, right) => (left.assignment[family] ?? 0) - (right.assignment[family] ?? 0));
 
-        const values = sweepSamples.map((sample) => sample.assignment[family]);
+        const values = sweepSamples.map((sample) => sample.assignment[family] ?? 0);
         const displacements = sweepSamples.map((sample) => {
             const packed = new Float32Array(drawables.length);
             drawables.forEach((drawable, drawableIndex) => {

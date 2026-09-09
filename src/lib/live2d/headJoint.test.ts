@@ -75,8 +75,8 @@ describe('joint head interpolation', () => {
 
 it('resolves mouth masks by actual ID within the same mesh', () => {
     const tooth = { id: 'tooth-2', label: '齿', meshId: 'a' };
-    const unrelated = { id: 'wrong', label: '口线', meshId: 'b' };
-    const lip = { id: 'actual-lip-42', label: '口线', meshId: 'a' };
+    const unrelated = { id: 'wrong', label: '颜', meshId: 'b' };
+    const lip = { id: 'actual-lip-42', label: '颜', meshId: 'a' };
     expect(resolveMouthMaskIds(tooth, [unrelated, lip, tooth])).toEqual([lip.id]);
     expect(resolveMouthMaskIds(tooth, [unrelated, tooth])).toBeUndefined();
 });

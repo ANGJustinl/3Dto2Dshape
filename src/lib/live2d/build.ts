@@ -18,7 +18,9 @@ import { computePoseDrawOrders } from './occlusionOrder';
 import { frameGeometryToViewport } from './framing';
 import { stabilizeHeadAngleKeyforms } from './headStabilization';
 import { buildHeadJointKeyforms } from './headJoint';
-import { resolveMouthMaskIds } from './mouthMasks';
+import { buildMouthRig } from './mouthRig';
+import { resolveMouthMaskIds, enforceMouthOrder } from './mouthMasks';
+import { resolveEyeMaskIds } from './eyeMasks';
 import type { ProjectionPartSource } from '../modelParts';
 import type { BakeBundle } from './types';
 
@@ -97,7 +99,7 @@ const cropTopDown = (
 };
 
 /** Bumped with every pipeline behavior change so stale bakes are detectable. */
-export const PIPELINE_VERSION = '2026-09-08.1';
+export const PIPELINE_VERSION = '2026-09-09.5';
 
 export const buildLive2dModel = async (options: BuildOptions): Promise<{
     model: Live2dModel;
@@ -200,13 +202,14 @@ export const buildLive2dModel = async (options: BuildOptions): Promise<{
     const rawFamilies = buildFamilyKeyforms(bundle, drawables);
     const depthFamilies = buildDepthKeyforms(bundle, drawables);
     const rawNeutralPositions = drawables.map((drawable) => drawableNeutralPositions(drawable, neutral));
+    const mouthRig = buildMouthRig(drawables, rawNeutralPositions, rawFamilies);
     const stabilizedFamilies = stabilizeHeadAngleKeyforms(
         drawables,
         rawNeutralPositions,
-        rawFamilies,
+        mouthRig.families,
     );
     const neutralMedians = drawables.map((drawable) => medianDepth(drawable, neutral));
-    const orderIds = computeDrawOrder(drawables, neutral);
+    const orderIds = enforceMouthOrder(drawables, computeDrawOrder(drawables, neutral));
     const poseDrawOrders = computePoseDrawOrders(
         drawables,
         orderIds.map((id) => drawables.findIndex((drawable) => drawable.id === id)),
@@ -218,7 +221,7 @@ export const buildLive2dModel = async (options: BuildOptions): Promise<{
     );
     const orderIndexById = new Map(orderIds.map((id, index) => [id, index]));
 
-    const joints = buildHeadJointKeyforms(bundle, drawables, rawNeutralPositions, rawFamilies);
+    const joints = [...buildHeadJointKeyforms(bundle, drawables, rawNeutralPositions, rawFamilies), ...mouthRig.joints];
     const evaluator = createPoseEvaluator(drawables, rawNeutralPositions, stabilizedFamilies, joints);
     const errorReport = evaluateComboError(bundle, drawables, evaluator);
     const orderReport = checkOrderConsistency(bundle, drawables, orderIds);
@@ -255,7 +258,8 @@ export const buildLive2dModel = async (options: BuildOptions): Promise<{
             uvs,
             texture: baked.texture,
             renderOrder: orderIndexById.get(drawable.id) ?? drawableIndex,
-            maskIds: resolveMouthMaskIds(drawable, drawables),
+            maskIds: resolveMouthMaskIds(drawable, drawables) ?? resolveEyeMaskIds(drawable, drawables),
+            invertedMask: !!(resolveMouthMaskIds(drawable, drawables) ?? resolveEyeMaskIds(drawable, drawables)),
         };
     });
 

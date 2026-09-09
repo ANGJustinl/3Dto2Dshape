@@ -159,6 +159,7 @@ export const buildProjectedPartShapeFromRasterData = (
     });
     const averagedNormal = new THREE.Vector3(normalX, normalY, normalZ).normalize();
     const shape = {
+        opacity: part.opacity,
         leafId: part.leafId,
         sourceLeafId: part.sourceLeafId ?? part.leafId,
         paintLayer: part.paintLayer ?? 'base',
