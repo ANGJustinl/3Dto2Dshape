@@ -1,4 +1,4 @@
-
+.env*
 models
 .npm-cache
 dist
