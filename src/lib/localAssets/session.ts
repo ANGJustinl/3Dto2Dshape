@@ -32,8 +32,8 @@ export function createAssetSession(projectId: string, files: AssetFile[]) {
     },
     resolveUrl(url: string): string {
       if (/^(data:|blob:)/i.test(url)) return url;
-      if (!url.startsWith(prefix)) throw new Error(`无法读取本地素材：${url}`);
-      if (disposed) throw new Error('本地素材已经关闭，请重新选择模型。');
+      if (!url.startsWith(prefix)) throw new Error(`Unable to read local asset: ${url}`);
+      if (disposed) throw new Error('Local assets have been closed. Please select the model again.');
       const rawPath = url.slice(prefix.length);
       const candidates = [rawPath];
       try { candidates.unshift(decodeURIComponent(rawPath)); } catch { /* Literal percent in a filename. */ }
@@ -59,7 +59,7 @@ export function createAssetSession(projectId: string, files: AssetFile[]) {
           if (matches?.length === 1) { match = matches[0]; break; }
         }
       }
-      if (!match) throw new Error(`缺少贴图或文件：${candidates[0]}。请重新选择完整模型文件夹。`);
+      if (!match) throw new Error(`Missing texture or file: ${candidates[0]}. Please select the complete model folder again.`);
       let objectUrl = objectUrls.get(match);
       if (!objectUrl) {
         objectUrl = URL.createObjectURL(assets.get(match)!);

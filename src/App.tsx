@@ -59,7 +59,7 @@ const RUNTIME_STATUS_LABELS: Record<RuntimeStatus, string> = {
     'loading-model': 'Loading PMX model…',
     'loading-textures': 'Waiting for model textures…',
     ready: 'Ready',
-    'model-error': '模型或贴图加载失败。请导入完整模型文件夹。',
+    'model-error': 'Model or texture loading failed. Please import the complete model folder.',
     'wasm-loading': 'Initializing CPU raster WASM…',
     'wasm-failed': 'WASM initialization failed. Choose TypeScript fallback or retry in Advanced settings.',
     'wasm-timed-out': 'WASM initialization timed out. Choose TypeScript fallback or retry in Advanced settings.',
@@ -470,13 +470,13 @@ function App({
             if (disposed) return;
             assetLoadFailed = true;
             setAssetStatus('model-error');
-            setAssetError(error instanceof Error ? error.message : '模型或贴图无法读取，请选择完整模型文件夹。');
+            setAssetError(error instanceof Error ? error.message : 'Unable to read the model or textures. Please select the complete model folder.');
         };
         manager.onError = (url) => {
             if (disposed) return;
             const original = sourceUrls.get(url) ?? url;
             if (/\.vmd$/i.test(original)) return; // The motion callback has its own error state.
-            failAssetLoad(new Error(`无法读取模型或贴图：${original.replace(/^local-assets:\/\/[^/]+\//, '')}`));
+            failAssetLoad(new Error(`Unable to read model or texture: ${original.replace(/^local-assets:\/\/[^/]+\//, '')}`));
         };
 
         const tryAttachMmdAnimation = async () => {
@@ -603,7 +603,7 @@ function App({
                     if (disposed || currentToken !== animationLoadToken) {
                         return;
                     }
-                    setAnimationError(error instanceof Error ? `动作加载失败：${error.message}` : '动作加载失败，请重新选择 VMD 文件。');
+                    setAnimationError(error instanceof Error ? `Motion loading failed: ${error.message}` : 'Motion loading failed. Please select the VMD file again.');
                     console.warn('Failed to load VMD animation.', error);
                 },
             );
@@ -688,7 +688,7 @@ function App({
         stepForwardStrideFramesRef.current = () => stepAnimationByFrames(frameStrideRef.current);
 
         const applySegmentation = (targetModel: THREE.Object3D) => {
-            const segmentation = splitModelParts(targetModel, initialModelName);
+            const segmentation = splitModelParts(targetModel);
             leafMaterialMapRef.current = segmentation.leafMaterialMap;
             projectionPartsRef.current = segmentation.projectionParts;
             projectionMaskStateRef.current = createProjectionMaskState(
@@ -724,7 +724,7 @@ function App({
                 }
 
                 if (performance.now() - startedAt > 60_000) {
-                    failAssetLoad(new Error('贴图加载超时，请检查所选模型文件夹是否包含全部贴图。'));
+                    failAssetLoad(new Error('Texture loading timed out. Make sure the selected model folder contains all textures.'));
                     return;
                 }
 
@@ -1276,7 +1276,7 @@ function App({
         if (!frameProvider || assetStatus !== 'ready') {
             throw new Error('The model and projection are not ready for export.');
         }
-        if (sourceBusy || operationBusyRef.current) throw new Error('请等待当前素材保存、烘焙或导出完成。');
+        if (sourceBusy || operationBusyRef.current) throw new Error('Please wait for the current save, bake or export to finish.');
         operationBusyRef.current = true;
         setOperationBusy(true);
         onOperationStateChange?.(true);
@@ -1307,7 +1307,7 @@ function App({
         if (!runner || assetStatus !== 'ready') {
             throw new Error('The scene is not ready for building.');
         }
-        if (sourceBusy || operationBusyRef.current) throw new Error('请等待当前素材保存、烘焙或导出完成。');
+        if (sourceBusy || operationBusyRef.current) throw new Error('Please wait for the current save, bake or export to finish.');
         operationBusyRef.current = true;
         setOperationBusy(true);
         onOperationStateChange?.(true);

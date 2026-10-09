@@ -23,41 +23,26 @@ canvas {
     display: block;
 }
 
-.asset-library {
-    flex: 0 0 auto;
-    padding: 12px;
-    border: 1px solid rgba(81, 68, 61, 0.22);
-    border-radius: 4px;
-    background: rgba(255, 255, 255, 0.55);
-}
-.asset-library-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.asset-library h1 { margin: 0; font-size: 19px; }
-.asset-library h2 { margin: 14px 0 8px; font-size: 14px; }
-.asset-library p { font-size: 12px; line-height: 1.6; margin: 8px 0; overflow-wrap: anywhere; }
-.asset-library-heading a { font-size: 12px; color: #51443d; }
-.asset-library-actions { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
-.asset-library-actions button { padding: 7px 9px; border: 1px solid #c7bab0; border-radius: 3px; background: #fffdf8; color: #302a24; cursor: pointer; }
-.asset-library-actions button:disabled { opacity: 0.5; cursor: wait; }
-.asset-library-hint { color: #73675d; }
-.asset-library-message { color: #3a664b; }
-.asset-library-error, .asset-animation-error { color: #9a3029; }
+.asset-library .part-chip:disabled { opacity: 0.5; cursor: default; }
+.asset-library .export-hint { overflow-wrap: anywhere; }
+.asset-animation-error { color: #9a3029; }
 .asset-animation-error { position: absolute; top: 12px; left: 12px; right: 12px; padding: 10px; background: #fff3e8; font-size: 12px; }
 .workspace-placeholder { display: flex; flex-direction: column; justify-content: center; align-items: center; padding: 24px; text-align: center; color: #51443d; }
 .workspace-placeholder h2 { font-size: 24px; }
 .workspace-placeholder p { font-size: 14px; line-height: 1.7; }
-@media (max-width: 1000px) {
-    .app-shell { grid-template-columns: 300px minmax(0, 1fr) minmax(0, 1fr); }
-}
-@media (max-width: 700px) {
-    .app-shell { grid-template-columns: 240px minmax(240px, 1fr) minmax(240px, 1fr); overflow-x: auto; }
-}
-
 .app-shell {
     display: grid;
     grid-template-columns: 420px minmax(0, 1fr) minmax(0, 1fr);
     width: 100%;
     height: 100%;
     background: #0a0a0a;
+}
+
+@media (max-width: 1000px) {
+    .app-shell { grid-template-columns: 300px minmax(0, 1fr) minmax(0, 1fr); }
+}
+@media (max-width: 700px) {
+    .app-shell { grid-template-columns: 240px minmax(240px, 1fr) minmax(240px, 1fr); overflow-x: auto; }
 }
 
 .part-panel {

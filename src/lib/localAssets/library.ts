@@ -22,7 +22,7 @@ export function normalizeAssetPath(path: string): string {
   for (const part of path.replace(/\\/g, '/').split('/')) {
     if (!part || part === '.') continue;
     if (part === '..') {
-      if (!parts.length) throw new Error('文件路径超出了所选文件夹。');
+      if (!parts.length) throw new Error('File path is outside the selected folder.');
       parts.pop();
     } else {
       parts.push(part);
@@ -38,7 +38,7 @@ export function collectAssetFiles(files: File[]): AssetFile[] {
   for (const file of files) {
     const path = normalizeAssetPath(file.webkitRelativePath || file.name);
     if (supportedResource.test(path)) {
-      if (result.has(path)) throw new Error(`有重复文件路径：${path}`);
+      if (result.has(path)) throw new Error(`Duplicate file path: ${path}`);
       result.set(path, { path, blob: file });
     }
   }
@@ -48,7 +48,7 @@ export function collectAssetFiles(files: File[]): AssetFile[] {
 export function createAssetWorkspace(files: File[]): AssetWorkspace {
   const assets = collectAssetFiles(files);
   const modelPaths = assets.filter((file) => /\.(pmx|pmd)$/i.test(file.path)).map((file) => file.path).sort();
-  if (!modelPaths.length) throw new Error('请选择包含 .pmx 或 .pmd 模型及贴图的文件夹。压缩包请先解压。');
+  if (!modelPaths.length) throw new Error('Select a folder containing a .pmx or .pmd model and its textures. Extract archives first.');
   const motionPaths = assets.filter((file) => /\.vmd$/i.test(file.path)).map((file) => file.path).sort();
   const now = Date.now();
   return {
@@ -71,7 +71,7 @@ export function createAssetWorkspace(files: File[]): AssetWorkspace {
 
 export function addWorkspaceMotions(workspace: AssetWorkspace, files: File[]): AssetWorkspace {
   const motions = files.filter((file) => /\.vmd$/i.test(file.name));
-  if (!motions.length) throw new Error('请选择 .vmd 动作文件。');
+  if (!motions.length) throw new Error('Please select .vmd motion files.');
   const merged = new Map(workspace.files.map((file) => [file.path, file]));
   for (const file of motions) {
     const path = normalizeAssetPath(`_imported_motions/${file.name}`);
@@ -98,7 +98,7 @@ function openLibrary(): Promise<IDBDatabase> {
   if (!databasePromise) {
     databasePromise = new Promise<IDBDatabase>((resolve, reject) => {
       if (!globalThis.indexedDB) {
-        reject(new Error('当前浏览器无法保存本地文件。'));
+        reject(new Error('This browser cannot save local files.'));
         return;
       }
       const request = indexedDB.open('3dto2d-local-assets', 1);
@@ -118,10 +118,10 @@ function openLibrary(): Promise<IDBDatabase> {
         };
         resolve(request.result);
       };
-      request.onerror = () => reject(request.error ?? new Error('无法打开浏览器素材库。'));
+      request.onerror = () => reject(request.error ?? new Error('Unable to open the browser library.'));
       request.onblocked = () => {
         blocked = true;
-        reject(new Error('请关闭其他旧版本页面后重试。'));
+        reject(new Error('Close other pages running an older version and try again.'));
       };
     }).catch((error) => { databasePromise = undefined; throw error; });
   }
@@ -131,15 +131,15 @@ function openLibrary(): Promise<IDBDatabase> {
 function requestResult<T>(request: IDBRequest<T>): Promise<T> {
   return new Promise((resolve, reject) => {
     request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error ?? new Error('读取浏览器素材失败。'));
+    request.onerror = () => reject(request.error ?? new Error('Unable to read saved assets.'));
   });
 }
 
 function transactionDone(transaction: IDBTransaction): Promise<void> {
   return new Promise((resolve, reject) => {
     transaction.oncomplete = () => resolve();
-    transaction.onabort = () => reject(transaction.error ?? new Error('浏览器保存已中止。'));
-    transaction.onerror = () => reject(transaction.error ?? new Error('浏览器保存失败。'));
+    transaction.onabort = () => reject(transaction.error ?? new Error('Browser save was aborted.'));
+    transaction.onerror = () => reject(transaction.error ?? new Error('Browser save failed.'));
   });
 }
 
@@ -162,7 +162,7 @@ export async function loadWorkspace(id: string): Promise<AssetWorkspace> {
       transaction.objectStore('files').index('projectId').getAll(id),
     ),
   ]);
-  if (!project || !records.length) throw new Error('保存的素材已被清除，请重新导入。');
+  if (!project || !records.length) throw new Error('Saved assets have been cleared. Please import them again.');
   return { project, files: records.map(({ path, blob }) => ({ path, blob })), persisted: true };
 }
 
@@ -205,7 +205,7 @@ export async function removeWorkspace(id: string): Promise<void> {
 
 export function storageFailureMessage(error: unknown): string {
   if (error instanceof DOMException && error.name === 'QuotaExceededError') {
-    return '浏览器空间不足。本次仍可使用，刷新后需重新选择文件；可先移除不用的浏览器素材。';
+    return 'Browser storage is full. Files are available for this session only; import them again after reloading or remove unused saved assets and retry.';
   }
-  return '浏览器未能保存文件。本次仍可使用，刷新后需重新选择文件。';
+  return 'Files could not be saved in this browser. They are available for this session only; import them again after reloading.';
 }

@@ -11,6 +11,7 @@
 | 本地模型与动作 | 导入 PMX / PMD 模型文件夹及贴图；单独添加 VMD；支持一个文件夹内切换多个模型。 |
 | 浏览器素材库 | 保存文件本身及模型、动作选择，刷新后恢复；可切换已保存素材或移除浏览器副本。素材不会上传至服务器。 |
 | 实时 3D 转 2D | 使用模型材质法线、明暗阈值滞回、稳定填色及深度遮挡，减轻头发、脸部和衣服色块反复出现、消失的问题。 |
+| 材质兼容 | 按材质类型、几何、骨骼权重与表情位移识别完全重合的附加球面高光层，避免平涂预览中的黑色覆盖与深度竞争；不依赖模型名称。 |
 | Live2D 烘焙 | 自动解析模型骨骼与表情，采样参数、拆分 ArtMesh、捕获贴图并生成参数关键形。 |
 | 面部与颈部修复 | 统一脸部、眼睑与遮罩的表面变形；基于源骨骼的头部锚点和颈部过渡，改善转头漂移与分离。 |
 | 模型文件 | 保存、重新打开本项目的模型 ZIP；导出包含 `.moc3`、`.model3.json` 和纹理图集的原生 Live2D 文件包。 |
@@ -41,10 +42,12 @@ npm run preview
 
 ## 导入模型与动作
 
-1. 解压模型包，点击 **导入模型文件夹**，选择包含模型和所有贴图的文件夹。保留素材原有目录结构。
-2. 如果文件夹有多个 `.pmx` / `.pmd`，在 **模型路径** 中选择要使用的模型。
-3. 点击 **添加 VMD 动作**，选择本地动作文件；也会自动收集模型文件夹内的 VMD。随后在动作下拉框中切换并播放。
-4. 文件会自动保存。看到 **已保存在此浏览器** 后，刷新页面或下次打开相同网址即可恢复。
+界面控件统一使用英文，沿用上游的侧栏、折叠面板与控件样式。
+
+1. 解压模型包，在 **Local Assets** 中点击 **Import Model Folder**，选择包含模型和所有贴图的文件夹。保留素材原有目录结构。
+2. 如果文件夹有多个 `.pmx` / `.pmd`，在 **Model Path** 中选择要使用的模型。
+3. 点击 **Add VMD Motion**，选择本地动作文件；也会自动收集模型文件夹内的 VMD。随后在动作下拉框中切换并播放。
+4. 文件会自动保存。看到 **Saved in This Browser** 后，刷新页面或下次打开相同网址即可恢复。
 
 目录示例：
 
@@ -58,7 +61,7 @@ MyModel/
     greeting.vmd
 ```
 
-**选择模型及贴图** 可以一次选择多个文件，但浏览器可能不提供其子目录；贴图同名或目录复杂的模型请使用文件夹导入。支持常见 PNG、JPEG、BMP、TGA 等图片，以及使用这些图片内容的 SPH / SPA 材质文件。缺失或无法读取的贴图会显示错误。
+**Select Model & Textures** 可以一次选择多个文件，但浏览器可能不提供其子目录；贴图同名或目录复杂的模型请使用文件夹导入。支持常见 PNG、JPEG、BMP、TGA 等图片，以及使用这些图片内容的 SPH / SPA 材质文件。缺失或无法读取的贴图会显示错误。
 
 浏览器通过文件选择器读取文件，不能凭输入的 `C:\...` 路径直接访问磁盘。这里显示和保存的是所选文件夹内的相对路径。
 
@@ -67,8 +70,8 @@ MyModel/
 文件 Blob 保存在 IndexedDB，临时对象 URL 仅用于当前会话。当前模型和 VMD 选择与文件分开保存，切换时无需重写所有贴图。
 
 - 保存仅属于当前浏览器、用户配置和网址。在线版与本地版、不同本地端口的素材库相互独立。
-- **移除浏览器副本** 只删除网站保存的文件，不会删除原始本地素材。
-- 如果空间不足或浏览器禁止保存，仍可在本次页面中使用，页面会明确提示刷新后需要重新选择；也可以稍后点击 **保存到浏览器** 重试。
+- **Remove Saved Copy** 只删除网站保存的文件，不会删除原始本地素材。
+- 如果空间不足或浏览器禁止保存，仍可在本次页面中使用，页面会明确提示刷新后需要重新选择；也可以稍后点击 **Save to Browser** 重试。
 - 清除网站数据、隐私窗口关闭或浏览器回收空间可能移除副本，请保留原始模型与导出文件。[浏览器存储说明](https://developer.mozilla.org/en-US/docs/Web/API/Storage_API/Storage_quotas_and_eviction_criteria)
 
 素材库保存源模型、贴图和 VMD。Live2D 烘焙产物请通过导出 ZIP 单独保存；渲染参数不会自动保存。
@@ -106,6 +109,7 @@ flowchart TD
 | Processing | Main files |
 | --- | --- |
 | `Local Asset Library` | [WorkspaceApp.tsx](src/WorkspaceApp.tsx), [AssetLibraryPanel.tsx](src/components/AssetLibraryPanel.tsx), [localAssets/](src/lib/localAssets/) |
+| `Material Compatibility / Segmentation` | [materialOverlays.ts](src/lib/materialOverlays.ts), [modelParts.ts](src/lib/modelParts.ts) |
 | `Scene / Frame Scheduling` | [App.tsx](src/App.tsx), [ProjectionOverlay.tsx](src/components/ProjectionOverlay.tsx), [overlayPipeline.ts](src/lib/2DRenderPipeline/overlayPipeline.ts) |
 | `Mesh Projection / Authored Normals` | [meshProjection/](src/lib/2DRenderStages/meshProjection/) |
 | `Temporal Paint / Visible Regions` | [temporalPaint.ts](src/lib/2DRenderPipeline/temporalPaint.ts), [visibleRegions.ts](src/lib/2DRenderPipeline/visibleRegions.ts) |
@@ -122,6 +126,8 @@ flowchart TD
 ### Flat-Paint Style
 
 纹理与材质颜色形成底色，骨骼变形后的材质法线与世界空间光照决定阴影、高光。各层独立栅格化、执行深度可见性裁剪并生成轮廓，再按材质透明度和绘画顺序合成。
+
+3D 预览和 2D 渲染共用平涂材质预处理。MMD 的球面高光不会按原始自定义着色器重现；仅当附加球面材质的全部三角形与底层表面重合、骨骼权重和所有位置表情均一致时，省略该重复效果层。真实独立表面、乘法球面材质及会在动画中分离的表面保留。
 
 本分支默认采用已验收的稳定填色配置：材质法线、明暗阈值滞回、材质可见性、严格深度遮挡与保留栅格轮廓。阴影强度、高光强度、简化、描线及光照等可在侧栏调整；高级选项保留其他频闪控制方案。
 

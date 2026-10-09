@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import type { FocusLevel, MacroGroup, PaintLayerKind } from './2DRenderShared/types';
+import { findRedundantMaterialOverlayGroups } from './materialOverlays';
 
 export type PartNode = {
     id: string;
@@ -123,10 +124,6 @@ export type TriangleSampleDebugInfo = {
         hex: string;
         alpha: number;
     };
-};
-
-const MODEL_MATERIAL_EXCLUSION_KEYWORDS: Record<string, string[]> = {
-    Corin: ['髪+'],
 };
 
 const COLOR_EDGE_BUCKET_SIZE = 4;
@@ -1106,29 +1103,21 @@ const cloneLeafMaterial = (material: THREE.Material) => {
     });
 };
 
-const shouldExcludeMaterialForModel = (modelName: string | null | undefined, materialName: string) => {
-    if (!modelName) {
-        return false;
-    }
-
-    const keywords = MODEL_MATERIAL_EXCLUSION_KEYWORDS[modelName];
-    if (!keywords || keywords.length === 0) {
-        return false;
-    }
-
-    return keywords.some((keyword) => materialName.includes(keyword));
-};
-
 const buildMeshSegmentation = (
     mesh: THREE.Mesh | THREE.SkinnedMesh,
     leafMaterialMap: Map<string, THREE.Material>,
     debugMaterials: MaterialDebugInfo[],
     projectionParts: ProjectionPartSource[],
-    modelName: string | null | undefined,
 ) => {
     const indexedGeometry = ensureIndexedGeometry(mesh.geometry);
     const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
     const groups = getGeometryGroups(indexedGeometry, materials.length);
+    const redundantOverlays = findRedundantMaterialOverlayGroups(indexedGeometry, materials, groups);
+    mesh.userData.flatPaintOmittedOverlays = [...redundantOverlays].map((groupIndex) => ({
+        materialName: materials[groups[groupIndex].materialIndex].name,
+        triangleCount: groups[groupIndex].count / 3,
+        reason: 'duplicate-additive-sphere-map',
+    }));
     const indexArray = indexedGeometry.index!.array;
     const uvAttribute = indexedGeometry.getAttribute('uv');
     const positionAttribute = indexedGeometry.getAttribute('position');
@@ -1140,14 +1129,11 @@ const buildMeshSegmentation = (
 
     groups.forEach((group, groupIndex) => {
         const material = materials[group.materialIndex];
-        if (!material) {
+        if (!material || redundantOverlays.has(groupIndex)) {
             return;
         }
 
         const materialName = material.name?.trim() || `material-${group.materialIndex}`;
-        if (shouldExcludeMaterialForModel(modelName, materialName)) {
-            return;
-        }
         const materialNodeChildren: PartNode[] = [];
         const materialLeafIds: string[] = [];
         const materialTriangleCount = Math.floor(group.count / 3);
@@ -1295,7 +1281,8 @@ const buildMeshSegmentation = (
 
 export const splitModelParts = (
     root: THREE.Object3D,
-    modelName: string | null | undefined = root.name,
+    // Retained for existing callers; material compatibility is independent of labels.
+    _modelName: string | null | undefined = root.name,
 ): SegmentationResult => {
     const leafMaterialMap = new Map<string, THREE.Material>();
     const parts: PartNode[] = [];
@@ -1313,7 +1300,6 @@ export const splitModelParts = (
                 leafMaterialMap,
                 debugMaterials,
                 projectionParts,
-                modelName,
             ),
         );
     });

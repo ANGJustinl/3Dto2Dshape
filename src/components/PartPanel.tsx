@@ -550,7 +550,7 @@ function PartPanel({
           />
         </label>
         <label className="projection-select">
-          <span>抗闪烁实验</span>
+          <span>Flicker Control</span>
           <select
             value={Object.entries(FLICKER_PRESETS).find(([, value]) => JSON.stringify(value) === JSON.stringify(projectionSettings.flickerControl))?.[0] ?? 'baseline'}
             onChange={event => onProjectionSettingsChange({
@@ -558,17 +558,17 @@ function PartPanel({
               flickerControl: { ...FLICKER_PRESETS[event.currentTarget.value as keyof typeof FLICKER_PRESETS] },
             })}
           >
-            <option value="baseline">原有渲染</option>
-            <option value="shade">减少明暗反复切换</option>
-            <option value="regions">明暗稳定＋合并零散阴影</option>
-            <option value="normals">局部法线平滑（实验）</option>
-            <option value="combined">组合方案</option>
-            <option value="sampling">细节采样 ×2（较慢）</option>
-            <option value="visible">合并遮挡后的碎阴影</option>
-            <option value="visibleStrong">合并更多碎阴影</option>
-            <option value="fast">明暗稳定＋减少重复计算</option>
-            <option value="visibleFast">碎阴影合并＋减少重复计算</option>
-            <option value="opaque">修正色块透明度＋明暗稳定</option>
+            <option value="baseline">Baseline</option>
+            <option value="shade">Shade Hysteresis</option>
+            <option value="regions">Stable Shades + Region Merge</option>
+            <option value="normals">Normal Smoothing (Experimental)</option>
+            <option value="combined">Combined</option>
+            <option value="sampling">2× Sampling (Slower)</option>
+            <option value="visible">Visible Region Merge</option>
+            <option value="visibleStrong">Strong Visible Region Merge</option>
+            <option value="fast">Stable Shades + Buffer Reuse</option>
+            <option value="visibleFast">Visible Region Merge + Buffer Reuse</option>
+            <option value="opaque">Stable Fill + Shade Hysteresis</option>
           </select>
         </label>
         <label className="projection-select">
