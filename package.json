@@ -18,6 +18,7 @@
     "webm-muxer": "^5.1.4"
   },
   "devDependencies": {
+    "@types/node": "^24.19.1",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.4",
     "@types/three": "^0.185.2",
