@@ -1,8 +1,10 @@
 import * as THREE from 'three';
-import { createPoseEvaluator, type PoseEvaluator } from './keyforms';
+import { type PoseEvaluator } from './keyforms';
+import { createModelPoseEvaluator } from './anchoredHeadRig';
 import type { Live2dModel } from './model';
 import type { FaceParamId, ParamAssignment } from './types';
 import { renderMaskedMeshes } from './stencilRendering';
+import { linearPremultipliedPixels } from './textureFiltering';
 
 /**
  * M4: interactive preview runtime. One textured mesh per drawable in an
@@ -31,6 +33,7 @@ export class Live2dPreviewRuntime {
     private readonly meshByDrawableId = new Map<string, THREE.Mesh>();
     private readonly assignment: ParamAssignment;
     private readonly defaults: ParamAssignment;
+    private readonly ranges = new Map<FaceParamId,{min:number;max:number}>();
 
     constructor(canvas: HTMLCanvasElement, model: Live2dModel) {
         this.renderer = new THREE.WebGLRenderer({
@@ -72,12 +75,12 @@ export class Live2dPreviewRuntime {
         );
         this.defaults = {} as ParamAssignment;
         model.params.forEach((param) => {
+            this.ranges.set(param.id,{min:param.min,max:param.max});
             this.assignment[param.id] = param.default;
             this.defaults[param.id] = param.default;
         });
 
-        const neutralPositions = model.drawables.map((drawable) => drawable.neutralPositions);
-        this.evaluator = createPoseEvaluator(model.drawables, neutralPositions, model.families, model.jointKeyforms);
+        this.evaluator = createModelPoseEvaluator(model);
 
         model.drawables.forEach((drawable) => {
             const positions = new Float32Array(drawable.vertexCount * 3);
@@ -95,12 +98,13 @@ export class Live2dPreviewRuntime {
             geometry.setIndex(new THREE.BufferAttribute(drawable.triangles, 1));
 
             const texture = new THREE.DataTexture(
-                drawable.texture.rgba,
+                drawable.alphaCorrectFiltering ? Uint16Array.from(linearPremultipliedPixels(drawable.texture.rgba),v=>THREE.DataUtils.toHalfFloat(v)) : drawable.texture.rgba,
                 drawable.texture.width,
                 drawable.texture.height,
                 THREE.RGBAFormat,
+                drawable.alphaCorrectFiltering ? THREE.HalfFloatType : THREE.UnsignedByteType,
             );
-            texture.colorSpace = THREE.SRGBColorSpace;
+            texture.colorSpace = drawable.alphaCorrectFiltering ? THREE.LinearSRGBColorSpace : THREE.SRGBColorSpace;
             // DataTexture defaults to Nearest filtering, which shreds detail
             // when the 1024px bake textures are minified into the preview.
             texture.magFilter = THREE.LinearFilter;
@@ -110,14 +114,24 @@ export class Live2dPreviewRuntime {
             texture.needsUpdate = true;
 
             const material = new THREE.MeshBasicMaterial({
+                opacity: drawable.maskOnly ? 0 : 1,
                 map: texture,
                 transparent: true,
-                side: THREE.DoubleSide,
+                side: drawable.maskOnly ? THREE.FrontSide : THREE.DoubleSide,
                 depthTest: false,
                 depthWrite: false,
             });
+            if(drawable.alphaCorrectFiltering) material.onBeforeCompile=shader=>{
+                shader.fragmentShader=shader.fragmentShader.replace('#include <map_fragment>',`#ifdef USE_MAP
+                    vec4 sampledDiffuseColor = texture2D(map, vMapUv);
+                    sampledDiffuseColor.rgb /= max(sampledDiffuseColor.a, 0.00001);
+                    diffuseColor *= sampledDiffuseColor;
+                #endif`);
+            };
+            if(drawable.alphaCorrectFiltering) material.customProgramCacheKey=()=> 'live2d-linear-alpha-v1';
             const mesh = new THREE.Mesh(geometry, material);
             mesh.userData.invertedMask = drawable.invertedMask ?? false;
+            mesh.userData.maskOnly = drawable.maskOnly ?? false;
             mesh.renderOrder = drawable.renderOrder;
             mesh.frustumCulled = false;
             this.scene.add(mesh);
@@ -156,11 +170,12 @@ export class Live2dPreviewRuntime {
     }
 
     setParam(id: FaceParamId, value: number) {
-        this.assignment[id] = value;
+        const range=this.ranges.get(id);
+        this.assignment[id] = range?Math.min(range.max,Math.max(range.min,value)):value;
     }
 
     setAssignment(assignment: ParamAssignment) {
-        Object.assign(this.assignment, assignment);
+        Object.entries(assignment).forEach(([id,value])=>{if(value!==undefined)this.setParam(id as FaceParamId,value);});
     }
 
     getAssignment(): ParamAssignment {
@@ -182,7 +197,7 @@ export class Live2dPreviewRuntime {
 
     resetDrawableOpacities() {
         this.meshes.forEach((mesh) => {
-            (mesh.material as THREE.MeshBasicMaterial).opacity = 1;
+            (mesh.material as THREE.MeshBasicMaterial).opacity = mesh.userData.maskOnly ? 0 : 1;
         });
     }
 

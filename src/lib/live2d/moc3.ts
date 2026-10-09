@@ -1,4 +1,6 @@
-import { createPoseEvaluator } from './keyforms';
+import { createPoseEvaluator, type PoseEvaluator } from './keyforms';
+import { createModelPoseEvaluator } from './anchoredHeadRig';
+import {groupPosePlans} from './posePlanGroups';
 import type { Live2dModel } from './model';
 import type { FaceParamId, ParamAssignment } from './types';
 import { createZip, type ZipEntry } from './zip';
@@ -19,15 +21,13 @@ import { createZip, type ZipEntry } from './zip';
  *
  * Grid policy: a param binds only when it moves the drawable beyond 1% of
  * its neutral bounds; morph sweeps are subsampled to 3 keys; the tensor
- * product of bound params must fit 512 keyforms per artmesh, dropping the
+ * product of bound params must fit 2187 keyforms per artmesh, dropping the
  * weakest-motion params first (their motion exports as static). Positions
  * come from the additive evaluator; re-baking the grid against the 3D model
  * is the upgrade path.
  *
- * Binding layer (verified rendering in VTube Studio on a live export):
- * tensor slots are enumerated FIRST-outer (pool axis 0 slowest — VTS's
- * native Core order; the Web Core 5.x reads last-outer, so Web-side
- * previews of driven poses show swapped tensor axes by design), every
+ * Binding layer: tensor slots follow the Core order described at the
+ * enumeration below; exported positions use the shared pose evaluator. Every
  * bound parameter owns exactly ONE shared parameterBinding (pbsbi/pbsc
  * 1:1), artmeshes with the same param set share one keyformBinding,
  * keyform blocks in the kfPos pool are padded to 16-float strides, and
@@ -37,7 +37,7 @@ import { createZip, type ZipEntry } from './zip';
 
 const SLOT_COUNT = 101;
 const DATA_START = 0x7c0;
-/** Per-artmesh tensor budget: 3^5 keyforms with default 3-key grids. */
+/** Per-artmesh tensor budget: 3^7 keyforms with default 3-key grids. */
 const MAX_KEYFORMS_PER_ARTMESH = 2187;
 
 /** Flattened slot indices (version 1 declaration order, spec-verified). */
@@ -250,6 +250,12 @@ const drawableNeutralDiagonal = (neutralPositions: Float32Array) => {
     return Math.hypot(maxX - minX, maxY - minY);
 };
 
+const expressionVaries = (model:Live2dModel, drawableIndex:number, offsets:number[], family:string) => {
+    const keys=model.families[family]?.displacements;if(!keys?.length)return false;
+    const start=offsets[drawableIndex],end=start+model.drawables[drawableIndex].vertexCount*2;
+    return keys.slice(1).some(key=>{for(let i=start;i<end;i++)if(Math.abs(key[i]-keys[0][i])>1e-5)return true;return false;});
+};
+
 /** Evenly subsamples key values down to `cap`, always keeping min/max/default. */
 const subsampleKeys = (values: number[], defaultValue: number, cap: number) => {
     if (values.length <= cap) {
@@ -298,11 +304,28 @@ export type Moc3BuildResult = {
     keyformCounts: number[];
 };
 
+export type Moc3BuildOptions = {
+    angleKeys?: number[];
+    maxMorphKeys?: number;
+    /** Optional evaluator for exports with a composed anatomical rig. */
+    poseEvaluator?: PoseEvaluator;
+    /** Preserve evaluator dependencies even when an axial sweep is motionless. */
+    requiredParameters?: string[][];
+    maxKeyformsPerArtmesh?: number;
+};
+
 export const buildMoc3 = (
     model: Live2dModel,
-    options: { angleKeys?: number[]; maxMorphKeys?: number } = {},
+    suppliedOptions: Moc3BuildOptions = {},
 ): Moc3BuildResult => {
-    const { angleKeys = [-30, 0, 30], maxMorphKeys = 3 } = options;
+    const headIds=model.params.filter(p=>['ParamAngleX','ParamAngleY','ParamAngleZ'].includes(p.id)).map(p=>p.id);
+    const options:Moc3BuildOptions=model.headRig?{
+        ...suppliedOptions,
+        angleKeys:suppliedOptions.angleKeys??model.headRig.angleKeys,
+        poseEvaluator:suppliedOptions.poseEvaluator??createModelPoseEvaluator(model),
+        requiredParameters:suppliedOptions.requiredParameters??model.headRig.weights.map(w=>w.some(v=>v>0)?headIds:[]),
+    }:suppliedOptions;
+    const { angleKeys = [-30, 0, 30], maxMorphKeys = 3, maxKeyformsPerArtmesh = MAX_KEYFORMS_PER_ARTMESH } = options;
     const writer = new ByteWriter();
     const slotTargets = new Array<number>(SLOT_COUNT).fill(-1);
     const setSlot = (slot: number, target: number) => {
@@ -385,11 +408,16 @@ export const buildMoc3 = (
 
         // Reserve both joint axes, including motion absent from axial sweeps.
         const required = new Set<number>();
+        for(const id of options.requiredParameters?.[drawableIndex] ?? []) {
+            const index=model.params.findIndex(param=>param.id===id);
+            if(index<0)throw new Error(`Missing evaluator parameter ${id}`);
+            required.add(index);
+        }
         // Expression controls must not lose to larger head movements or the
         // whole-face relevance threshold. Six three-key axes require 729 cells.
         model.params.forEach((param, index) => {
-            if ((param.id === 'ParamMouthOpenY' || param.id === 'ParamMouthForm') &&
-                familyMotionMagnitude(model, drawableIndex, displacementOffsets, param.id) > 1e-5) {
+            if ((param.id === 'ParamMouthOpenY' || param.id === 'ParamMouthForm' || param.id === 'ParamEyeLOpen' || param.id === 'ParamEyeROpen') &&
+                expressionVaries(model, drawableIndex, displacementOffsets, param.id)) {
                 required.add(index);
             }
         });
@@ -405,11 +433,11 @@ export const buildMoc3 = (
         }
         const parameterIndices: number[] = [...required];
         let product = parameterIndices.reduce((count, index) => count * keyValuesByParamIndex[index].length, 1);
-        if (product > MAX_KEYFORMS_PER_ARTMESH) throw new Error('Joint parameter grid exceeds export budget.');
+        if (product > maxKeyformsPerArtmesh) throw new Error('Joint parameter grid exceeds export budget.');
         candidates.forEach((candidate) => {
             if (required.has(candidate.paramIndex)) return;
             const keyCount = keyValuesByParamIndex[candidate.paramIndex].length;
-            if (product * keyCount > MAX_KEYFORMS_PER_ARTMESH) {
+            if (product * keyCount > maxKeyformsPerArtmesh) {
                 return; // over budget: this and every weaker param stays static
             }
             parameterIndices.push(candidate.paramIndex);
@@ -479,7 +507,7 @@ export const buildMoc3 = (
         maskCounts.push(maskerIndices.length);
         maskerIndices.forEach((maskerIndex) => maskPool.push(maskerIndex));
         if (maskerIndices.length > 0) {
-            maskedFlags[index] = 4 | (drawable.invertedMask ? 0x08 : 0);
+            maskedFlags[index] = (drawable.maskOnly ? 0 : 4) | (drawable.invertedMask ? 0x08 : 0);
         }
     });
     const totalMaskIndices = maskPool.length;
@@ -689,7 +717,7 @@ export const buildMoc3 = (
     setSlot(
         SLOT.amFlags,
         appendArray(() =>
-            model.drawables.forEach((_drawable, index) => writer.u8(maskedFlags[index] ?? 4)),
+            model.drawables.forEach((drawable, index) => writer.u8(maskedFlags[index] ?? (drawable.maskOnly ? 0 : 4))),
         ),
     );
     setSlot(
@@ -736,7 +764,7 @@ export const buildMoc3 = (
     // ---- 68-70: ArtMeshKeyforms ----
     setSlot(
         SLOT.amKfOpacities,
-        f32Array(plans.flatMap((plan) => plan.keyformAssignments.map(() => 1))),
+        f32Array(plans.flatMap((plan) => plan.keyformAssignments.map(() => model.drawables[plan.drawableIndex].maskOnly ? 0 : 1))),
     );
     // Constant neutral rank per mesh across all keyforms.
     const orderScale = Math.max(1, model.drawables.length - 1);
@@ -776,26 +804,21 @@ export const buildMoc3 = (
     const halfHeight = model.viewport.height / 2;
     const pixelsPerUnit = model.viewport.width;
     const neutralPositions = model.drawables.map((drawable) => drawable.neutralPositions);
-    const poseEvaluator = createPoseEvaluator(model.drawables, neutralPositions, model.families, model.jointKeyforms);
+    const poseEvaluator = options.poseEvaluator ?? createPoseEvaluator(model.drawables, neutralPositions, model.families, model.jointKeyforms);
     const poseOutputs = model.drawables.map((drawable) => new Float32Array(drawable.vertexCount * 2));
     setSlot(
         SLOT.kfPos,
         appendArray(() => {
-            plans.forEach((plan) => {
-                const drawable = model.drawables[plan.drawableIndex];
-                const stride = keyformStride(drawable.vertexCount);
-                plan.keyformAssignments.forEach((assignment) => {
-                    poseEvaluator.evaluate(assignment, poseOutputs);
-                    const output = poseOutputs[plan.drawableIndex];
-                    for (let v = 0; v < drawable.vertexCount; v += 1) {
-                        writer.f32((output[v * 2] - halfWidth) / pixelsPerUnit);
-                        writer.f32((output[v * 2 + 1] - halfHeight) / pixelsPerUnit);
-                    }
-                    for (let pad = drawable.vertexCount * 2; pad < stride; pad += 1) {
-                        writer.f32(0);
-                    }
-                });
-            });
+            const pool=new Float32Array(totalKeyformVertexFloats);
+            const begins=new Map<number,number[]>();let cursor=0;
+            for(const plan of plans){const stride=keyformStride(model.drawables[plan.drawableIndex].vertexCount);begins.set(plan.drawableIndex,plan.keyformAssignments.map(()=>{const begin=cursor;cursor+=stride;return begin;}));}
+            for(const group of groupPosePlans(plans,model.params.map(p=>p.id))){
+                poseEvaluator.evaluate(group.assignment,poseOutputs);
+                for(const reference of group.references){const output=poseOutputs[reference.drawableIndex],begin=begins.get(reference.drawableIndex)![reference.key];
+                    for(let v=0;v<output.length;v+=2){pool[begin+v]=(output[v]-halfWidth)/pixelsPerUnit;pool[begin+v+1]=(output[v+1]-halfHeight)/pixelsPerUnit;}
+                }
+            }
+            for(const value of pool)writer.f32(value);
         }),
     );
 
@@ -1111,7 +1134,7 @@ export type PngEncoder = (texture: { width: number; height: number; rgba: Uint8A
 export const buildMoc3Archive = (
     model: Live2dModel,
     encodePng: PngEncoder,
-    options: { angleKeys?: number[]; maxMorphKeys?: number; atlasWidth?: number } = {},
+    options: Moc3BuildOptions & { atlasWidth?: number } = {},
 ): Uint8Array => {
     const atlasWidth =
         options.atlasWidth ?? Math.min(8192, 2048 * (model.textureScale ?? 1));

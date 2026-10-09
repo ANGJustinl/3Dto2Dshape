@@ -1,4 +1,4 @@
-type MaskPart = { id: string; label: string; meshId: string };
+type MaskPart = { id: string; label: string; meshId: string; facialRole?: 'skin'|'feature'; maskOnly?: boolean };
 
 /** Resolve actual drawable IDs; material labels and export IDs are different. */
 export const resolveMouthMaskIds = (drawable: MaskPart, drawables: MaskPart[]): string[] | undefined => {
@@ -13,9 +13,10 @@ export const resolveMouthMaskIds = (drawable: MaskPart, drawables: MaskPart[]): 
 /** Mouth interiors use the opening in the deforming face, not lip-line ink. */
 export function enforceMouthOrder<T extends MaskPart>(drawables: T[], order: string[]): string[] {
     const result = [...order];
-    for (const face of drawables.filter((d) => /^(顔|颜|face)(?:-|$)/i.test(d.label))) {
+    const anatomicalMeshes=new Set(drawables.filter(d=>d.facialRole==='skin').map(d=>d.meshId));
+    for (const face of drawables.filter(d=>d.facialRole==='skin'||(!anatomicalMeshes.has(d.meshId)&&/^(顔|颜|face)(?:-|$)/i.test(d.label)))) {
         const mouth = result.filter((id) => drawables.some((d) => d.id === id && d.meshId === face.meshId &&
-            /口|齿|歯|牙|舌|睫|目|眼|瞳|眉|二重|mouth|lip|teeth|tooth|tongue|eye|iris|lash|brow/i.test(d.label)));
+            (d.facialRole==='feature'||/口|齿|歯|牙|舌|睫|目|眼|瞳|眉|二重|mouth|lip|teeth|tooth|tongue|eye|iris|lash|brow/i.test(d.label))));
         for (const id of mouth) result.splice(result.indexOf(id), 1);
         result.splice(result.indexOf(face.id) + 1, 0, ...mouth);
         // Neutral median depth can put head-wrapping bangs behind the face

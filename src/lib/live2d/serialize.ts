@@ -1,6 +1,7 @@
 import type { FamilyKeyforms, JointKeyforms } from './keyforms';
 import type { Live2dModel } from './model';
 import { createZip, parseZip, type ZipEntry } from './zip';
+import { createModelPoseEvaluator } from './anchoredHeadRig';
 
 /**
  * M5: custom Live2D format serialization.
@@ -18,6 +19,8 @@ import { createZip, parseZip, type ZipEntry } from './zip';
  */
 
 type ModelFileManifest = {
+    textureScale?:number;
+    headRig?: {version:1;rig:NonNullable<Live2dModel['headRig']>['rig'];angleKeys:number[];weights:Array<{drawableId:string;file:string}>};
     schemaVersion: 1;
     createdAt: string;
     modelName: string;
@@ -37,6 +40,8 @@ type ModelFileManifest = {
         binFile: string;
         maskIds?: string[];
         invertedMask?: boolean;
+        maskOnly?: boolean;
+        alphaCorrectFiltering?: boolean;
     }>;
     families: Array<{
         family: string;
@@ -113,6 +118,7 @@ export const exportModel = (
         createdAt: model.createdAt,
         modelName: model.modelName,
         viewport: model.viewport,
+        textureScale:model.textureScale,
         params: model.params,
         order: model.order,
         drawables: [],
@@ -121,6 +127,11 @@ export const exportModel = (
         depths: [],
         joints: [],
     };
+
+    if(model.headRig){
+        createModelPoseEvaluator(model);
+        manifest.headRig={version:1,rig:model.headRig.rig,angleKeys:model.headRig.angleKeys,weights:model.drawables.map((d,i)=>{const file=`head-weights/${i}.bin`;entries.push({name:file,data:new Uint8Array(model.headRig!.weights[i].slice().buffer)});return{drawableId:d.id,file};})};
+    }
 
     model.drawables.forEach((drawable) => {
         const binFile = `drawables/${drawable.id}.bin`;
@@ -153,6 +164,8 @@ export const exportModel = (
             binFile,
             maskIds: drawable.maskIds,
             invertedMask: drawable.invertedMask,
+            maskOnly: drawable.maskOnly,
+            alphaCorrectFiltering: drawable.alphaCorrectFiltering,
         });
     });
 
@@ -240,6 +253,12 @@ const texturesCompatible = (left: Uint8Array, right: Uint8Array) => {
 /** Byte-level round-trip check: exported zip re-imports into identical buffers. */
 export const verifyRoundtripBytes = (original: Live2dModel, reimported: Live2dModel): string[] => {
     const problems: string[] = [];
+    if((original.textureScale??1)!==(reimported.textureScale??1))problems.push('texture scale differs');
+    if(!!original.headRig!==!!reimported.headRig)problems.push('anatomical head rig missing');
+    if(original.headRig&&reimported.headRig){
+        if(JSON.stringify([original.headRig.rig,original.headRig.angleKeys])!==JSON.stringify([reimported.headRig.rig,reimported.headRig.angleKeys]))problems.push('anatomical head rig differs');
+        if(original.headRig.weights.length!==reimported.headRig.weights.length||original.headRig.weights.some((w,i)=>!reimported.headRig!.weights[i]||!bytesEqual(w,reimported.headRig!.weights[i])))problems.push('anatomical head weights differ');
+    }
     if (original.drawables.length !== reimported.drawables.length) {
         problems.push(`drawable count ${original.drawables.length} != ${reimported.drawables.length}`);
         return problems;
@@ -274,6 +293,8 @@ export const verifyRoundtripBytes = (original: Live2dModel, reimported: Live2dMo
         }
         if ((drawable.maskIds ?? []).join() !== (other.maskIds ?? []).join()) problems.push(`${drawable.id}: masks differ`);
         if (!!drawable.invertedMask !== !!other.invertedMask) problems.push(`${drawable.id}: mask inversion differs`);
+        if (!!drawable.maskOnly !== !!other.maskOnly) problems.push(`${drawable.id}: mask visibility differs`);
+        if (!!drawable.alphaCorrectFiltering !== !!other.alphaCorrectFiltering) problems.push(`${drawable.id}: alpha filtering differs`);
     });
     Object.entries(original.families).forEach(([family, keyforms]) => {
         const other = reimported.families[family];
@@ -337,6 +358,7 @@ export const importModel = async (
         throw new Error('model.json missing from Live2D model archive.');
     }
     const manifest = JSON.parse(new TextDecoder().decode(manifestBytes)) as ModelFileManifest;
+    if(manifest.textureScale!==undefined&&(!Number.isFinite(manifest.textureScale)||manifest.textureScale<=0))throw new Error('Invalid texture scale');
 
     const drawables = await Promise.all(
         manifest.drawables.map(async (entry) => {
@@ -381,6 +403,8 @@ export const importModel = async (
                 renderOrder: 0,
                 maskIds: entry.maskIds,
                 invertedMask: entry.invertedMask,
+                maskOnly: entry.maskOnly,
+                alphaCorrectFiltering: entry.alphaCorrectFiltering,
             };
         }),
     );
@@ -448,11 +472,19 @@ export const importModel = async (
         };
     });
 
-    return {
+    let headRig:Live2dModel['headRig'];
+    if(manifest.headRig){
+        const data=manifest.headRig;
+        if(data.version!==1||!Array.isArray(data.angleKeys)||data.angleKeys.length<2||!data.angleKeys.includes(0)||!data.angleKeys.every((v,i)=>Number.isFinite(v)&&(i===0||v>data.angleKeys[i-1]))||!Array.isArray(data.weights)||data.weights.length!==drawables.length)throw new Error('Invalid anatomical head rig');
+        const weights=data.weights.map((entry,i)=>{const bin=files.get(entry.file)?.slice();if(entry.drawableId!==drawables[i].id||!bin||bin.byteLength!==drawables[i].vertexCount*4)throw new Error('Invalid anatomical head weights');return new Float32Array(bin.buffer);});
+        headRig={rig:data.rig,angleKeys:data.angleKeys,weights};
+    }
+    const model:Live2dModel = {
         schemaVersion: 1,
         createdAt: manifest.createdAt,
         modelName: manifest.modelName,
         viewport: manifest.viewport,
+        textureScale:manifest.textureScale,
         params: manifest.params,
         drawables,
         families,
@@ -462,5 +494,8 @@ export const importModel = async (
         order: manifest.order,
         errorReport: { comboCount: 0, meanErrorPx: 0, maxErrorPx: 0, perCombo: [], worstDrawable: null },
         orderReport: { flips: [], samplesChecked: 0 },
+        headRig,
     };
+    if(headRig)createModelPoseEvaluator(model);
+    return model;
 };

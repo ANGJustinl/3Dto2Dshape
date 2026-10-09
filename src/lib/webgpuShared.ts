@@ -30,7 +30,12 @@ class SharedWebGpuContext {
                 if (!adapter) {
                     return null;
                 }
-                const device = await adapter.requestDevice();
+                // Close-up views pack large part rasters into the depth atlas;
+                // ask for the adapter's real 2D texture limit (often 16384)
+                // instead of the 8192 default.
+                const device = await adapter.requestDevice({
+                    requiredLimits: { maxTextureDimension2D: adapter.limits.maxTextureDimension2D },
+                });
                 this.device = device;
                 return device;
             })();

@@ -20,7 +20,8 @@ type CentroidTransform = {
     sourceY: number;
     targetX: number;
     targetY: number;
-    scale: number;
+    a: number;
+    b: number;
 };
 
 const boundsOf = (positions: Float32Array): Bounds => {
@@ -72,11 +73,13 @@ const fitCentroidTransform = (
     source: Float32Array,
     target: Float32Array,
     allowScale: boolean,
+    allowRotation = false,
 ): CentroidTransform => {
     const sourceCentroid = centroidOf(source);
     const targetCentroid = centroidOf(target);
     let sourceRadius = 0;
     let targetRadius = 0;
+    let dot = 0, cross = 0;
     for (let index = 0; index < source.length; index += 2) {
         const sourceX = source[index] - sourceCentroid.x;
         const sourceY = source[index + 1] - sourceCentroid.y;
@@ -84,8 +87,12 @@ const fitCentroidTransform = (
         const targetY = target[index + 1] - targetCentroid.y;
         sourceRadius += sourceX * sourceX + sourceY * sourceY;
         targetRadius += targetX * targetX + targetY * targetY;
+        dot += sourceX * targetX + sourceY * targetY;
+        cross += sourceX * targetY - sourceY * targetX;
     }
     const rawScale = sourceRadius > 1e-9 ? Math.sqrt(targetRadius / sourceRadius) : 1;
+    const angle = allowRotation ? Math.atan2(cross, dot) : 0;
+    const scale = allowScale ? Math.max(0.97, Math.min(1.03, rawScale)) : 1;
     return {
         sourceX: sourceCentroid.x,
         sourceY: sourceCentroid.y,
@@ -93,13 +100,14 @@ const fitCentroidTransform = (
         targetY: targetCentroid.y,
         // Preserve the subtle silhouette compression of yaw, but pitch is a
         // rigid 2D head motion so it cannot stretch or squash the face.
-        scale: allowScale ? Math.max(0.97, Math.min(1.03, rawScale)) : 1,
+        a: scale * Math.cos(angle),
+        b: scale * Math.sin(angle),
     };
 };
 
 const transformedPoint = (transform: CentroidTransform, x: number, y: number) => ({
-    x: transform.targetX + (x - transform.sourceX) * transform.scale,
-    y: transform.targetY + (y - transform.sourceY) * transform.scale,
+    x: transform.targetX + (x - transform.sourceX) * transform.a - (y - transform.sourceY) * transform.b,
+    y: transform.targetY + (x - transform.sourceX) * transform.b + (y - transform.sourceY) * transform.a,
 });
 
 const smoothstep = (value: number) => {
@@ -112,6 +120,7 @@ const isFeatureInsideFace = (
     positions: Float32Array,
     faceBounds: Bounds,
 ) => {
+    if (drawable.facialRole || drawable.maskOnly) return true;
     if (HAIR_PATTERN.test(drawable.label) || HEAD_ACCESSORY_PATTERN.test(drawable.label)) {
         return false;
     }
@@ -138,7 +147,7 @@ const writeStabilizedDrawable = (
     packedOffset: number,
     neutral: Float32Array,
     transform: CentroidTransform,
-    residualWeightAt: (x: number, y: number) => number,
+    residualWeightAt: (x: number, y: number, vertex: number) => number,
 ) => {
     for (let local = 0; local < neutral.length; local += 2) {
         const neutralX = neutral[local];
@@ -146,7 +155,7 @@ const writeStabilizedDrawable = (
         const rigid = transformedPoint(transform, neutralX, neutralY);
         const rawX = neutralX + (raw[packedOffset + local] ?? 0);
         const rawY = neutralY + (raw[packedOffset + local + 1] ?? 0);
-        const residualWeight = residualWeightAt(neutralX, neutralY);
+        const residualWeight = residualWeightAt(neutralX, neutralY, local / 2);
         const targetX = rigid.x + (rawX - rigid.x) * residualWeight;
         const targetY = rigid.y + (rawY - rigid.y) * residualWeight;
         output[packedOffset + local] = targetX - neutralX;
@@ -171,8 +180,8 @@ export const stabilizeHeadAngleKeyforms = (
 ): Record<string, FamilyKeyforms> => {
     const faceIndex = drawables
         .map((drawable, index) => ({ drawable, index }))
-        .filter(({ drawable }) => drawable.vertexCount > 0 && FACE_ANCHOR_PATTERN.test(drawable.label) && !HAIR_PATTERN.test(drawable.label))
-        .sort((left, right) => right.drawable.vertexCount - left.drawable.vertexCount)[0]?.index;
+        .filter(({ drawable }) => drawable.vertexCount > 0 && (drawable.facialRole === 'skin' || (!drawable.facialRole && FACE_ANCHOR_PATTERN.test(drawable.label) && !HAIR_PATTERN.test(drawable.label))))
+        .sort((a,b)=>Number(b.drawable.facialRole==='skin')-Number(a.drawable.facialRole==='skin')||b.drawable.vertexCount-a.drawable.vertexCount)[0]?.index;
     if (faceIndex === undefined) {
         return families;
     }
@@ -186,19 +195,30 @@ export const stabilizeHeadAngleKeyforms = (
 
     return Object.fromEntries(
         Object.entries(families).map(([familyId, family]) => {
-            if (familyId !== 'ParamAngleX' && familyId !== 'ParamAngleY') {
+            if (familyId !== 'ParamAngleX' && familyId !== 'ParamAngleY' && familyId !== 'ParamAngleZ') {
                 return [familyId, family];
             }
             const isYaw = familyId === 'ParamAngleX';
+            const isRoll = familyId === 'ParamAngleZ';
+            // Share the same canonical grid with native Cubism. Intermediate
+            // head and expression transforms interpolate one matrix together.
+            const indices=[...new Set([0,family.values.indexOf(family.default),family.values.length-1])].filter(i=>i>=0).sort((a,b)=>a-b);
+            const transforms=indices.map(i=>({value:family.values[i],transform:fitCentroidTransform(faceNeutral,targetPositions(faceNeutral,family.displacements[i],offsets[faceIndex]),isYaw,isRoll)}));
+            const transformAt=(value:number):CentroidTransform=>{
+                if(transforms.length===1)return transforms[0].transform;
+                let hi=1;while(hi<transforms.length-1&&transforms[hi].value<value)hi++;
+                const lo=hi-1,t=Math.max(0,Math.min(1,(value-transforms[lo].value)/(transforms[hi].value-transforms[lo].value)));
+                const a=transforms[lo].transform,b=transforms[hi].transform;
+                return{sourceX:a.sourceX,sourceY:a.sourceY,targetX:a.targetX+(b.targetX-a.targetX)*t,targetY:a.targetY+(b.targetY-a.targetY)*t,a:a.a+(b.a-a.a)*t,b:a.b+(b.b-a.b)*t};
+            };
             return [
                 familyId,
                 {
                     ...family,
                     values: [...family.values],
-                    displacements: family.displacements.map((raw) => {
+                    displacements: family.displacements.map((raw,key) => {
                         const output = new Float32Array(raw);
-                        const faceTarget = targetPositions(faceNeutral, raw, offsets[faceIndex]);
-                        const transform = fitCentroidTransform(faceNeutral, faceTarget, isYaw);
+                        const transform = transformAt(family.values[key]);
 
                         drawables.forEach((drawable, drawableIndex) => {
                             const neutral = neutralPositions[drawableIndex];
@@ -208,6 +228,16 @@ export const stabilizeHeadAngleKeyforms = (
                             const isHair = HAIR_PATTERN.test(drawable.label);
                             const isAccessory = HEAD_ACCESSORY_PATTERN.test(drawable.label);
                             const isFeature = isFeatureInsideFace(drawable, neutral, faceBounds);
+                            if(isRoll){
+                                if(drawable.rollAttachment)writeStabilizedDrawable(output,raw,offset,neutral,transform,(_x,_y,v)=>1-drawable.rollAttachment![v]);
+                                else if(isFace||isFeature)writeStabilizedDrawable(output,raw,offset,neutral,transform,()=>0);
+                                return;
+                            }
+                            const attachment=drawable.headAttachment??drawable.rollAttachment;
+                            if(attachment){
+                                writeStabilizedDrawable(output,raw,offset,neutral,transform,(_x,_y,v)=>1-attachment[v]);
+                                return;
+                            }
 
                             if (isFace) {
                                 // The baked texture is a front projection, not a UV skin.

@@ -61,7 +61,7 @@ const waitForFrameWithTimeout = async (projector: BakeProjector, frameId: number
     ]);
 };
 
-export const bakePartsFromSources = (parts: ProjectionPartSource[]): BakePartSnapshot[] =>
+export const bakePartsFromSources = (parts: ProjectionPartSource[], params: ResolvedFaceParam[] = []): BakePartSnapshot[] =>
     parts.map((part) => ({
         leafId: part.leafId,
         label: part.label,
@@ -69,7 +69,21 @@ export const bakePartsFromSources = (parts: ProjectionPartSource[]): BakePartSna
         color: part.color,
         triangleCount: part.triangleCount,
         triangles: part.triangles.map((triangle) => [...triangle.vertexIndices] as [number, number, number]),
+        headVertexIndices: headVertices(part, params),
     }));
+
+function headVertices(part: ProjectionPartSource, params: ResolvedFaceParam[]): number[] | undefined {
+    if (!(part.mesh instanceof THREE.SkinnedMesh)) return undefined;
+    const binding = params.find(p=>p.id==='ParamAngleX'&&p.resolved?.meshId===part.mesh.uuid)?.resolved;
+    const head = part.mesh.skeleton.bones.find(b=>b.name===binding?.boneName);
+    const indices=part.mesh.geometry.getAttribute('skinIndex'),weights=part.mesh.geometry.getAttribute('skinWeight');
+    if(!head||!indices||!weights)return undefined;
+    const headBones=new Set<number>();part.mesh.skeleton.bones.forEach((bone,index)=>{let parent:THREE.Object3D|null=bone;while(parent){if(parent===head){headBones.add(index);break;}parent=parent.parent;}});
+    return [...new Set(part.triangles.flatMap(t=>t.vertexIndices))].filter(v=>{
+        let total=0;for(let lane=0;lane<4;lane++)if(headBones.has(indices.getComponent(v,lane)))total+=weights.getComponent(v,lane);
+        return total>=.8;
+    });
+}
 
 export type BakeTargets = {
     mesh: THREE.SkinnedMesh;
@@ -251,7 +265,7 @@ export const bakeFaceParams = async (options: BakeOptions): Promise<BakeBundle> 
         createdAt: new Date().toISOString(),
         modelName,
         params: resolution.params,
-        parts: bakePartsFromSources(parts),
+        parts: bakePartsFromSources(parts, resolution.params),
         samples,
     };
 };

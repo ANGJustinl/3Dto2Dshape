@@ -1,3 +1,5 @@
+import {h264CodecCandidates} from './h264Levels';
+
 export type ExportVideoSource = 'overlay2d' | 'model3d' | 'sideBySide';
 export type ExportVideoFormat = 'webm' | 'mp4';
 
@@ -277,11 +279,7 @@ const selectWebCodecsConfig = async (
               { codec: 'vp09.00.10.08', muxCodec: 'V_VP9' },
               { codec: 'vp8', muxCodec: 'V_VP8' },
           ]
-        : [
-              { codec: 'avc1.640028', muxCodec: 'avc' },
-              { codec: 'avc1.4d4028', muxCodec: 'avc' },
-              { codec: 'avc1.42001f', muxCodec: 'avc' },
-          ];
+        : h264CodecCandidates(width, height, fps, bitrate);
 
     for (const candidate of candidates) {
         const config = {

@@ -22,6 +22,20 @@ const family = (id: 'ParamAngleX' | 'ParamAngleY', displacement: number[]): Fami
 });
 
 describe('head angle stabilization', () => {
+    it('keeps anatomically attached head vertices with the face across yaw and pitch while preserving torso vertices',()=>{
+        const drawables=[{...drawable('surface-42',4),facialRole:'skin' as const},{...drawable('material-8',3),rollAttachment:Float32Array.from([1,1,0])}];
+        const neutral=[Float32Array.from([-1,-1,1,-1,-1,1,1,1]),Float32Array.from([-1,-2,1,-2,1,10])];
+        for(const id of ['ParamAngleX','ParamAngleY'] as const){
+            const result=stabilizeHeadAngleKeyforms(drawables,neutral,{[id]:family(id,[5,2,5,2,5,2,5,2,20,3,20,3,20,3])});
+            expect([...result[id].displacements[0].slice(8)]).toEqual([5,2,5,2,20,3]);
+        }
+    });
+    it('uses sampled anatomical roles with arbitrary labels and keeps their attachment coherent',()=>{
+        const drawables=[{...drawable('material-42',4),facialRole:'skin' as const},{...drawable('material-99',2),facialRole:'feature' as const}];
+        const neutral=[Float32Array.from([-1,-1,1,-1,-1,1,1,1]),Float32Array.from([-.5,0,.5,0])];
+        const result=stabilizeHeadAngleKeyforms(drawables,neutral,{ParamAngleX:family('ParamAngleX',[5,2,5,2,5,2,5,2,15,2,15,2])});
+        expect([...result.ParamAngleX.displacements[0].slice(8)]).toEqual([5,2,5,2]);
+    });
     it('keeps eyes and front hair on the same face transform during yaw', () => {
         const drawables = [drawable('D颜', 4), drawable('D目', 2), drawable('D前髪', 2)];
         const neutral = [

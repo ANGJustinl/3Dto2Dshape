@@ -3,6 +3,7 @@ import type { Point2D, WasmRasterSnapshot } from '../2DRenderShared/types';
 import type { RasterizedPartData } from '../2DRenderStages/partRasterization/rasterizer';
 import type { ProjectionPartSource } from '../modelParts';
 import { recordPerfSample } from '../perfLogger';
+import { RasterOutputCapacity } from './rasterOutputCapacity';
 
 export type WasmRasterPartInput = {
     part: ProjectionPartSource;
@@ -12,6 +13,7 @@ export type WasmRasterPartInput = {
 };
 
 type WasmModule = {
+    _raster_contour_set_visibility?: (tolerance: number, opacityPointer: number, count: number) => void;
     _malloc(size: number): number;
     _free(pointer: number): void;
     _rasterize_contour_batch(
@@ -32,6 +34,7 @@ type WasmModule = {
 };
 
 export type WasmRasterBatchResult = {
+    nativeVisibility?: boolean;
     parts: Array<RasterizedPartData | null>;
     loopCount: number;
     outputBytes: number;
@@ -84,6 +87,7 @@ const toPoints = (triangleData: Float32Array) => {
 };
 
 class RasterContourClient {
+    private readonly outputCapacity = new RasterOutputCapacity();
     private modulePromise: Promise<WasmModule | null> | null = null;
     private snapshot: WasmRasterSnapshot = { status: 'idle', initMs: 0, lastError: null };
     private listeners = new Set<(snapshot: WasmRasterSnapshot) => void>();
@@ -161,7 +165,7 @@ class RasterContourClient {
         return this.modulePromise;
     }
 
-    async runBatch(width: number, height: number, inputs: WasmRasterPartInput[]): Promise<WasmRasterBatchResult | null> {
+    async runBatch(width: number, height: number, inputs: WasmRasterPartInput[], reuseOutputCapacity = false, visibility?: {tolerance: number; opacities: number[]}): Promise<WasmRasterBatchResult | null> {
         const module = await this.initialize();
         if (!module || inputs.length === 0) {
             return null;
@@ -203,26 +207,23 @@ class RasterContourClient {
         const inputPack = performance.now() - inputPackStart;
 
         let outputPointer = 0;
+        let opacityPointer = 0;
         try {
-            const query = module._rasterize_contour_batch(
+            if (module._raster_contour_set_visibility) {
+                if (visibility) {
+                    const opacities = Float32Array.from(visibility.opacities);
+                    opacityPointer = module._malloc(opacities.byteLength);
+                    module.HEAPF32.set(opacities, opacityPointer / 4);
+                }
+                module._raster_contour_set_visibility(visibility?.tolerance ?? 0.0005, opacityPointer, visibility ? inputs.length : 0);
+            }
+            const output = this.outputCapacity.execute(module, (pointer, capacity) => module._rasterize_contour_batch(
                 width, height, trianglePointer, triangleOffset,
                 partOffsetPointer, partCountPointer, fallbackDepthPointer,
-                inputs.length, 0, 0,
-            );
-            if (query <= 0) {
-                throw new Error(`WASM rasterizer returned ${query} while querying output size.`);
-            }
-            outputPointer = module._malloc(query);
-            const wasmCallStart = performance.now();
-            const written = module._rasterize_contour_batch(
-                width, height, trianglePointer, triangleOffset,
-                partOffsetPointer, partCountPointer, fallbackDepthPointer,
-                inputs.length, outputPointer, query,
-            );
-            const wasmCall = performance.now() - wasmCallStart;
-            if (written <= 0 || written > query) {
-                throw new Error(`WASM rasterizer returned invalid output size ${written}.`);
-            }
+                inputs.length, pointer, capacity,
+            ), reuseOutputCapacity);
+            outputPointer = output.pointer;
+            const written = output.written, wasmCall = output.writeMs;
             const outputCopyStart = performance.now();
             const bytes = module.HEAPU8.slice(outputPointer, outputPointer + written);
             const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
@@ -315,6 +316,8 @@ class RasterContourClient {
                 values: {
                     inputPack,
                     wasmCall,
+                    sizeQuery: output.queryMs,
+                    capacityRetries: output.retries,
                     wasmRasterize: wasmCall,
                     wasmDepthVisibility: 0,
                     wasmContour: 0,
@@ -330,6 +333,7 @@ class RasterContourClient {
                 },
             });
             return {
+                nativeVisibility: !!module._raster_contour_set_visibility,
                 parts,
                 loopCount,
                 outputBytes: written,
@@ -340,6 +344,8 @@ class RasterContourClient {
             this.setSnapshot({ ...this.snapshot, status: 'failed', lastError: message });
             return null;
         } finally {
+            module._raster_contour_set_visibility?.(0.0005, 0, 0);
+            if (opacityPointer) module._free(opacityPointer);
             module._free(trianglePointer);
             module._free(partOffsetPointer);
             module._free(partCountPointer);

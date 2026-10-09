@@ -10,6 +10,7 @@ import { composeProjectedShapes } from '../2DRenderStages/partShaping/shapeCompo
 import { ShapeTrackState } from './shapeTracking';
 import { getStyleModeDefaults } from '../2DRenderShared/focusResolver';
 import { previewEyeShadow } from './previewEyeShadow';
+import { TemporalPaintState, projectionRasterScale } from './temporalPaint';
 
 type RenderJob = {
     root: THREE.Object3D | null;
@@ -56,6 +57,7 @@ const getProjectionGeometrySignature = (settings: ProjectionOverlaySettings) =>
         gapMergeThreshold: settings.gapMergeThreshold,
         partOverrides: settings.partOverrides,
         cpuRasterBackend: settings.cpuRasterBackend ?? 'ts',
+        flickerControl: settings.flickerControl,
     });
 
 const restyleProjectionResult = (
@@ -85,6 +87,7 @@ export class OverlayRenderPipeline {
     private processing = false;
     private droppedQueuedFrames = 0;
     private readonly shapeTrackState = new ShapeTrackState();
+    private readonly temporalPaintState = new TemporalPaintState();
     private projectionCache: ProjectionCacheEntry | null = null;
     private idleWaiters: Array<() => void> = [];
 
@@ -208,6 +211,7 @@ export class OverlayRenderPipeline {
                           job.settings,
                           job.visibleLeafIds,
                           frame,
+                          job.settings.flickerControl ? this.temporalPaintState : undefined,
                       );
                 const shapingMs = performance.now() - shapingStart;
                 if (!projectionResult) {
@@ -278,7 +282,11 @@ export class OverlayRenderPipeline {
                     job.viewportHeight,
                     job.settings,
                     projectionResult.depthAtlas,
+                    { pixelRatio: (window.devicePixelRatio || 1) / projectionRasterScale(job.settings) },
                 );
+                const rasterScale = projectionRasterScale(job.settings);
+                canvas.style.width = `${job.viewportWidth / rasterScale}px`;
+                canvas.style.height = `${job.viewportHeight / rasterScale}px`;
                 const composeMs = performance.now() - composeStart;
                 const overlayMs = performance.now() - overlayStart;
 

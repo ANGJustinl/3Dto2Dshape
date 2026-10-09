@@ -1,4 +1,4 @@
-type PerfSample = {
+export type PerfSample = {
     label: string;
     values: Record<string, number>;
 };
@@ -10,11 +10,18 @@ type PerfBucket = {
 };
 
 const buckets = new Map<string, PerfBucket>();
+const listeners = new Set<(sample: PerfSample) => void>();
+/** Experimental profiling observes the same samples used by the interactive renderer. */
+export const subscribePerfSamples = (listener: (sample: PerfSample) => void) => {
+    listeners.add(listener);
+    return () => { listeners.delete(listener); };
+};
 const LOG_INTERVAL = 20;
 
 const round = (value: number) => Math.round(value * 100) / 100;
 
 export const recordPerfSample = ({ label, values }: PerfSample) => {
+    listeners.forEach(listener => listener({ label, values }));
     const bucket = buckets.get(label) ?? {
         count: 0,
         sums: {},

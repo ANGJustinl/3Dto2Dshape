@@ -1,7 +1,20 @@
 import type { ProjectionSharedChain } from '../modelParts';
 import type { OrientedBounds2D } from '../orientedBounds';
+import type { FlickerControlSettings } from '../2DRenderPipeline/temporalPaint';
 
 export type ProjectionOverlaySettings = {
+    /** Model compatibility experiment: obey source alpha and draw side. */
+    respectMaterialVisibility?: boolean;
+    depthVisibilityTolerance?: number;
+    useAuthoredNormals?: boolean;
+    /** Diagnostic only; averaged alpha is not suitable for detailed cutouts. */
+    sampleTextureAlpha?: boolean;
+    /** Retain per-part coverage buffers for explicit pixel probes only. */
+    debugRaster?: boolean;
+    /** At zero simplification, retain raster-visible boundaries. False reproduces legacy snapping for diagnosis. */
+    preserveRasterContours?: boolean;
+    /** Optional experimental controls. Omitted settings retain the existing renderer. */
+    flickerControl?: FlickerControlSettings;
     enabled: boolean;
     styleMode: ProjectionStyleMode;
     simplifyEpsilon: number;
@@ -35,6 +48,13 @@ export type ProjectionOverlaySettings = {
     partOverrides: Record<string, ProjectionPartStyleOverride>;
     /** CPU raster/contour backend. Omitted by older persisted settings and treated as TS. */
     cpuRasterBackend?: CpuRasterBackend;
+    /**
+     * Viewport pixels each fill extends past its contour. Neighbouring shapes
+     * are simplified independently, so their edges can leave hairline cracks;
+     * a small bleed overlaps them and the depth test picks the front shape.
+     * Omitted or 0 draws fills exactly to their contours.
+     */
+    fillBleed?: number;
 };
 
 export type CpuRasterBackend = 'auto' | 'wasm' | 'ts';
@@ -93,6 +113,7 @@ export type ProjectionPartStyleOverride = {
 };
 
 export type ProjectedPartShape = {
+    preserveSmallPaintRegions?: boolean;
     /** Realtime display override only; not applied by the bake/export path. */
     previewFlatInk?: boolean;
     /** Material alpha, separate from the global overlay opacity. */
@@ -153,6 +174,7 @@ export type ProjectedSharedChain = {
 };
 
 export type MeshProjectionCache = {
+    worldNormals?: Float32Array;
     width: number;
     height: number;
     screenX: Float32Array;

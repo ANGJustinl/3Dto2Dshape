@@ -1,6 +1,14 @@
 import type { ComboErrorReport, FamilyKeyforms, JointKeyforms, ScalarFamilyKeyforms } from './keyforms';
 import type { OrderFlip } from './order';
 import type { FaceParamDefinition, FaceParamId } from './types';
+import type { AnchoredHeadRig } from './anchoredHeadRig';
+
+export type AnatomicalHeadData = {
+    rig: AnchoredHeadRig;
+    /** Original source skin weights, one buffer per drawable. */
+    weights: Float32Array[];
+    angleKeys: number[];
+};
 
 /** Slider-facing param definition (source binding stripped). */
 export type Live2dParamDefinition = Pick<
@@ -46,9 +54,13 @@ export type Live2dDrawable = {
      */
     maskIds?: string[];
     invertedMask?: boolean;
+    /** Invisible color pass; still contributes full texture alpha to clipping. */
+    maskOnly?: boolean;
+    alphaCorrectFiltering?: boolean;
 };
 
 export type Live2dModel = {
+    headRig?: AnatomicalHeadData;
     schemaVersion: 1;
     createdAt: string;
     modelName: string;

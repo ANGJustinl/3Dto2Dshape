@@ -14,6 +14,7 @@ export const filterSmallProjectedPartShapes = (
             ...shape,
             loops: shape.loops.filter(
                 (loop) =>
+                    shape.preserveSmallPaintRegions ||
                     (preserveProtectedShapes &&
                         (shape.connectivityRole === 'bridge' ||
                             shape.connectivityRole === 'accent' ||

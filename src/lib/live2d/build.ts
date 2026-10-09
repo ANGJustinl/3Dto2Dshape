@@ -10,6 +10,7 @@ import {
     decomposeDrawables,
     drawableBoundsAtNeutral,
     drawableNeutralPositions,
+    type DrawableDecomposition,
 } from './decomposition';
 import { buildFamilyKeyforms, buildDepthKeyforms, createPoseEvaluator, evaluateComboError } from './keyforms';
 import type { Live2dDrawable, Live2dModel, Live2dTexture } from './model';
@@ -21,8 +22,14 @@ import { buildHeadJointKeyforms } from './headJoint';
 import { buildMouthRig } from './mouthRig';
 import { resolveMouthMaskIds, enforceMouthOrder } from './mouthMasks';
 import { resolveEyeMaskIds } from './eyeMasks';
+import { buildEyeOcclusion } from './eyeOcclusion';
+import { buildHeadExpressionJoints } from './headExpressionJoints';
+import {buildEyeForeground} from './eyeForeground';
+import {copySourceDeformation} from './sourceDeformation';
+import {extendForegroundPaint} from './foregroundPaint';
+import {captureAnatomicalHeadSource,frameAnatomicalHeadSource,type AnatomicalHeadSource} from './anchoredHeadSource';
 import type { ProjectionPartSource } from '../modelParts';
-import type { BakeBundle } from './types';
+import type { BakeBundle, BakeSample } from './types';
 
 /**
  * M1-M3 assembly: face bake -> pose-invariant decomposition -> isolated
@@ -62,12 +69,17 @@ export type BuildOptions = {
         leafIds: string[],
         camera: THREE.PerspectiveCamera,
         viewport: { width: number; height: number },
+        drawable?: DrawableDecomposition,
+        neutral?: BakeSample,
     ) => Promise<IsolatedRenderResult | null>;
     renderIsolated: (
         leafIds: string[],
         camera: THREE.PerspectiveCamera,
         viewport: { width: number; height: number },
+        drawable?: DrawableDecomposition,
     ) => IsolatedRenderResult;
+    /** Refresh mutable scene/depth caches before each texture pass. */
+    onTexturePassStart?: () => void;
     onProgress?: (stage: 'samples' | 'textures', done: number, total: number, detail: string) => void;
 };
 
@@ -99,7 +111,28 @@ const cropTopDown = (
 };
 
 /** Bumped with every pipeline behavior change so stale bakes are detectable. */
-export const PIPELINE_VERSION = '2026-09-09.5';
+export const PIPELINE_VERSION = '2026-10-09.23';
+/** The rasterizer owns one mutable depth atlas. Consume scene textures
+ * before any surface pass uploads a different atlas into that resource. */
+export const texturePassOrder = (drawables: DrawableDecomposition[]) => [...drawables].sort((a,b)=>Number(!!a.surfaceTexture)-Number(!!b.surfaceTexture));
+
+/** Resolve local layers only after their painted alpha has been inspected. */
+export const finalEyeTextureLayers=(bundle:BakeBundle,candidates:DrawableDecomposition[],targets:Map<string,string[]>,paint?:Map<string,{texture:Live2dTexture;scale:number}>)=>{
+    const independent=new Set<string>();
+    for(const source of candidates.filter(d=>!d.surfaceTexture&&!d.maskOnly)){
+        const patches=candidates.filter(d=>d.surfaceSourceId===source.id&&d.surfaceTexture&&!d.maskOnly);
+        if(patches.some(d=>d.facialRole==='skin'||d.blinkSupport)||!source.rollAttachment?.every(w=>w>=.8))continue;
+        const original=paint?.get(source.id);if(!original)continue;
+        let alpha=0;for(let p=3;p<original.texture.rgba.length;p+=4)alpha+=original.texture.rgba[p]/255;
+        // Original paint has already had blink windows cut out. Visible paint
+        // outside them identifies an independent head surface such as hair.
+        if(alpha/(original.scale*original.scale)<4)continue;
+        independent.add(source.id);source.textureCutoutRegions=undefined;
+    }
+    const layers=candidates.filter(d=>!independent.has(d.surfaceSourceId??'')&&(!d.surfaceTexture||d.maskOnly||d.facialRole==='skin'||d.blinkSupport||targets.has(d.id)));
+    layers.push(...buildEyeForeground(bundle,layers));
+    return layers;
+};
 
 export const buildLive2dModel = async (options: BuildOptions): Promise<{
     model: Live2dModel;
@@ -131,6 +164,8 @@ export const buildLive2dModel = async (options: BuildOptions): Promise<{
     }
 
     let drawables: ReturnType<typeof decomposeDrawables> = [];
+    let headSource: AnatomicalHeadSource | undefined;
+    let eyeMaskTargets = new Map<string, string[]>();
     const bakedTextures = new Map<string, { texture: Live2dTexture; cropX: number; cropY: number }>();
 
     const samples = await collectBakeSamples({
@@ -155,23 +190,40 @@ export const buildLive2dModel = async (options: BuildOptions): Promise<{
                 schemaVersion: 1,
                 createdAt: '',
                 modelName,
-                params: [],
-                parts: bakePartsFromSources(parts),
+                params: resolution.params,
+                parts: bakePartsFromSources(parts, resolution.params),
                 samples: neutralSamples,
             };
             drawables = decomposeDrawables(bundleForDecomposition);
+            const occlusion = buildEyeOcclusion(bundleForDecomposition, drawables);
+            // Keep static eye candidates through alpha analysis. Large
+            // transparent supports can hide occlusion in the geometry pass.
+            const configureTextures=()=>{const patchedSources=new Set(drawables.filter(d=>d.surfaceTexture&&!d.maskOnly).map(d=>d.surfaceSourceId));
+            drawables.forEach(d=>{
+                if(!d.surfaceTexture&&!patchedSources.has(d.id)){d.textureCutoutRegions=undefined;d.headAttachment=undefined;}
+                d.textureRevealLeafIds=[...new Set(drawables.filter(other=>other.meshId===d.meshId&&other.surfaceTexture).flatMap(other=>other.leafIds))];
+                d.textureRevealTriangleKeys=new Set(drawables.filter(other=>other.meshId===d.meshId&&(other.surfaceTexture||other.foregroundOnly||other.facialForeground)).flatMap(other=>Array.from({length:other.triangleCount},(_,i)=>Array.from(other.triangles.subarray(i*3,i*3+3),v=>other.meshVertexIndices[v]).join(','))));
+            });};
+            configureTextures();
+            eyeMaskTargets = occlusion.targets;
+            drawables.push(...occlusion.maskers);
 
             const textureViewport = {
                 width: Math.round(viewport.width * textureScale),
                 height: Math.round(viewport.height * textureScale),
             };
-            for (let index = 0; index < drawables.length; index += 1) {
-                const drawable = drawables[index];
+            const renderTextures=async()=>{options.onTexturePassStart?.();const textureDrawables = texturePassOrder(drawables);
+            for (let index = 0; index < textureDrawables.length; index += 1) {
+                const drawable = textureDrawables[index];
+                if (drawable.maskOnly) {
+                    bakedTextures.set(drawable.id, { texture: {width:1,height:1,rgba:new Uint8Array([255,255,255,255])},cropX:0,cropY:0 });
+                    continue;
+                }
                 onProgress?.('textures', index, drawables.length, drawable.label);
                 const composed = renderDrawable2D
-                    ? await renderDrawable2D(drawable.leafIds, neutralCamera, textureViewport)
+                    ? await renderDrawable2D(drawable.leafIds, neutralCamera, textureViewport, drawable, neutral)
                     : null;
-                const render = composed ?? renderIsolated(drawable.leafIds, neutralCamera, textureViewport);
+                const render = composed ?? renderIsolated(drawable.leafIds, neutralCamera, textureViewport, drawable);
                 const neutralBounds = drawableBoundsAtNeutral(drawable, neutral);
                 const bounds = {
                     minX: neutralBounds.minX * textureScale,
@@ -181,7 +233,19 @@ export const buildLive2dModel = async (options: BuildOptions): Promise<{
                 };
                 const cropped = cropTopDown(render, bounds, texturePad * textureScale, textureViewport);
                 bakedTextures.set(drawable.id, cropped);
+            }};
+            await renderTextures();
+            const paintedOcclusion=buildEyeOcclusion(bundleForDecomposition,drawables,new Map([...bakedTextures].map(([id,value])=>[id,{...value,scale:textureScale}])));
+            for(const [id,masks] of paintedOcclusion.targets)eyeMaskTargets.set(id,masks);
+            for(const mask of paintedOcclusion.maskers)if(!drawables.some(d=>d.id===mask.id)){
+                drawables.push(mask);bakedTextures.set(mask.id,{texture:{width:1,height:1,rgba:new Uint8Array([255,255,255,255])},cropX:0,cropY:0});
             }
+            drawables=finalEyeTextureLayers(bundleForDecomposition,drawables,eyeMaskTargets,new Map([...bakedTextures].map(([id,value])=>[id,{texture:value.texture,scale:textureScale}])));
+            configureTextures();
+            // Candidate-only surfaces must not leave cutouts in final hair or
+            // skin. Rebuild textures from the final retained layer set.
+            await renderTextures();
+            headSource=captureAnatomicalHeadSource(parts,neutralCamera,neutral,drawables,resolution.params);
             onProgress?.('textures', drawables.length, drawables.length, 'done');
         },
     });
@@ -191,7 +255,7 @@ export const buildLive2dModel = async (options: BuildOptions): Promise<{
         createdAt: new Date().toISOString(),
         modelName,
         params: resolution.params,
-        parts: bakePartsFromSources(parts),
+        parts: bakePartsFromSources(parts, resolution.params),
         samples,
     };
     const neutral = samples.find((sample) => sample.kind === 'neutral');
@@ -209,7 +273,9 @@ export const buildLive2dModel = async (options: BuildOptions): Promise<{
         mouthRig.families,
     );
     const neutralMedians = drawables.map((drawable) => medianDepth(drawable, neutral));
-    const orderIds = enforceMouthOrder(drawables, computeDrawOrder(drawables, neutral));
+    const baseOrder = enforceMouthOrder(drawables, computeDrawOrder(drawables, neutral));
+    const foregroundIds=new Set(drawables.filter(d=>d.foregroundOnly||d.facialForeground).map(d=>d.id));
+    const orderIds=[...baseOrder.filter(id=>!foregroundIds.has(id)),...baseOrder.filter(id=>foregroundIds.has(id))];
     const poseDrawOrders = computePoseDrawOrders(
         drawables,
         orderIds.map((id) => drawables.findIndex((drawable) => drawable.id === id)),
@@ -221,7 +287,8 @@ export const buildLive2dModel = async (options: BuildOptions): Promise<{
     );
     const orderIndexById = new Map(orderIds.map((id, index) => [id, index]));
 
-    const joints = [...buildHeadJointKeyforms(bundle, drawables, rawNeutralPositions, rawFamilies), ...mouthRig.joints];
+    const joints = [...buildHeadJointKeyforms(bundle, drawables, rawNeutralPositions, rawFamilies), ...mouthRig.joints, ...buildHeadExpressionJoints(drawables, rawNeutralPositions, stabilizedFamilies)];
+    copySourceDeformation(drawables,stabilizedFamilies,joints);
     const evaluator = createPoseEvaluator(drawables, rawNeutralPositions, stabilizedFamilies, joints);
     const errorReport = evaluateComboError(bundle, drawables, evaluator);
     const orderReport = checkOrderConsistency(bundle, drawables, orderIds);
@@ -236,6 +303,7 @@ export const buildLive2dModel = async (options: BuildOptions): Promise<{
         const sourcePositions = rawNeutralPositions[drawableIndex];
         const positions = framedGeometry.neutralPositions[drawableIndex];
         for (let v = 0; v < drawable.vertexCount; v += 1) {
+            if(drawable.maskOnly){uvs[v*2]=.5;uvs[v*2+1]=.5;continue;}
             // Neutral positions are in 1x canvas pixels; the baked crop and
             // texture live in textureScale-x texels. Convert positions into
             // texel space so every term shares one unit — mixing them makes
@@ -258,11 +326,14 @@ export const buildLive2dModel = async (options: BuildOptions): Promise<{
             uvs,
             texture: baked.texture,
             renderOrder: orderIndexById.get(drawable.id) ?? drawableIndex,
-            maskIds: resolveMouthMaskIds(drawable, drawables) ?? resolveEyeMaskIds(drawable, drawables),
-            invertedMask: !!(resolveMouthMaskIds(drawable, drawables) ?? resolveEyeMaskIds(drawable, drawables)),
+            maskOnly: drawable.maskOnly,
+            alphaCorrectFiltering: drawable.surfaceTexture || drawable.foregroundOnly,
+            maskIds: eyeMaskTargets.get(drawable.id) ?? resolveMouthMaskIds(drawable, drawables) ?? (drawable.facialRole ? undefined : resolveEyeMaskIds(drawable, drawables)),
+            invertedMask: !!(eyeMaskTargets.get(drawable.id) ?? resolveMouthMaskIds(drawable, drawables) ?? (drawable.facialRole ? undefined : resolveEyeMaskIds(drawable, drawables))),
         };
     });
 
+    extendForegroundPaint(live2dDrawables,drawables);
     const model: Live2dModel = {
         schemaVersion: 1,
         createdAt: new Date().toISOString(),
@@ -286,6 +357,13 @@ export const buildLive2dModel = async (options: BuildOptions): Promise<{
         textureScale,
         poseDrawOrders,
     };
+
+    if(headSource){
+        model.headRig=frameAnatomicalHeadSource(headSource,drawables,framedGeometry.transform);
+        const headIds=['ParamAngleX','ParamAngleY','ParamAngleZ'];
+        model.params=model.params.map(p=>headIds.includes(p.id)?{...p,min:-15,max:15}:p);
+        model.jointKeyforms=(model.jointKeyforms??[]).filter(j=>!headIds.includes(j.x.family)&&!headIds.includes(j.y.family));
+    }
 
     return { model, bundle };
 };

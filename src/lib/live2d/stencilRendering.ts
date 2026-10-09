@@ -26,7 +26,7 @@ export function renderMaskedMeshes(
             renderer.clearStencil();
             for (const group of masks) {
                 const original = group.maskerMesh.material;
-                group.stencilWriteMaterial.opacity = (original as THREE.MeshBasicMaterial).opacity;
+                group.stencilWriteMaterial.opacity = group.maskerMesh.userData.maskOnly ? 1 : (original as THREE.MeshBasicMaterial).opacity;
                 group.maskerMesh.material = group.stencilWriteMaterial;
                 try {
                     renderer.render(group.maskerMesh, camera);

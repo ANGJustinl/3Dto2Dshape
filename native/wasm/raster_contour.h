@@ -11,6 +11,8 @@
 
 extern "C" {
 
+RASTER_CONTOUR_EXPORT void raster_contour_set_visibility(float tolerance, const float* opacities, int32_t count);
+
 RASTER_CONTOUR_EXPORT int32_t rasterize_contour_batch(
     int32_t viewport_width,
     int32_t viewport_height,

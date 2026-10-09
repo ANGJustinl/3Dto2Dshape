@@ -9,11 +9,11 @@ describe('motion3.json parsing and evaluation', () => {
             Meta: { Duration: 2, Fps: 30, Loop: true },
             Curves: [
                 // linear 0->10 over [0,1], then hold 10 over [1,2]
-                { Target: 'Parameter', Id: 'ParamAngleX', Segments: [0, 0, 1, 1, 10, 1, 2, 10] },
+                { Target: 'Parameter', Id: 'ParamAngleX', Segments: [0, 0, 0, 1, 10, 0, 2, 10] },
                 // stepped: 1 until t=1, then 0
-                { Target: 'PartOpacity', Id: 'PartA', Segments: [0, 1, 3, 1, 0] },
+                { Target: 'PartOpacity', Id: 'PartA', Segments: [0, 1, 2, 1, 0] },
                 // bezier from (0,0) to (1,10) with control points pulling low
-                { Target: 'Parameter', Id: 'ParamAngleY', Segments: [0, 0, 2, 0.3, 1, 0.7, 9, 1, 10] },
+                { Target: 'Parameter', Id: 'ParamAngleY', Segments: [0, 0, 1, 0.3, 1, 0.7, 9, 1, 10] },
             ],
         });
         expect(motion.duration).toBe(2);
@@ -41,12 +41,12 @@ describe('motion3.json parsing and evaluation', () => {
     it('loops and clamps evaluation time', () => {
         const motion = parseMotion({
             Meta: { Duration: 2, Loop: true },
-            Curves: [{ Target: 'Parameter', Id: 'ParamAngleX', Segments: [0, 0, 1, 2, 30] }],
+            Curves: [{ Target: 'Parameter', Id: 'ParamAngleX', Segments: [0, 0, 0, 2, 30] }],
         });
         expect(evaluateMotion(motion, 3).parameters.ParamAngleX).toBeCloseTo(15); // t=1 after one loop
         const nonLoop = parseMotion({
             Meta: { Duration: 2, Loop: false },
-            Curves: [{ Target: 'Parameter', Id: 'ParamAngleX', Segments: [0, 0, 1, 2, 30] }],
+            Curves: [{ Target: 'Parameter', Id: 'ParamAngleX', Segments: [0, 0, 0, 2, 30] }],
         });
         expect(evaluateMotion(nonLoop, 99).parameters.ParamAngleX).toBeCloseTo(30);
     });

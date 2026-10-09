@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
 import * as THREE from 'three';
 import { frameFrontCamera } from './lib/live2d/frontCamera';
 import { MMDAnimationHelper } from 'three/examples/jsm/animation/MMDAnimationHelper.js';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { MMDLoader } from 'three/examples/jsm/loaders/MMDLoader.js';
-import ammoWasmScriptUrl from 'three/examples/jsm/libs/ammo.wasm.js?url';
-import ammoWasmUrl from 'three/examples/jsm/libs/ammo.wasm.wasm?url';
+import { ensureAmmo } from './lib/ammo';
 import PartPanel from './components/PartPanel';
 import ProjectionOverlay, { type ProjectionOverlayHandle } from './components/ProjectionOverlay';
 import {
@@ -21,6 +21,8 @@ import {
     type ProjectionOverlaySettings,
 } from './lib/2DRenderShared/types';
 import { createProjectionMaskState } from './lib/2DRenderShared/maskState';
+import { createDefaultProjectionSettings } from './lib/2DRenderShared/defaultSettings';
+import { projectionRasterScale } from './lib/2DRenderPipeline/temporalPaint';
 import { getStyleModeDefaults } from './lib/2DRenderShared/focusResolver';
 import { getWebGpuScreenProjector } from './lib/2DRenderStages/meshProjection/projector';
 import { compose2DRenderOverlay } from './lib/2DRenderStages/composition';
@@ -37,6 +39,10 @@ import {
 import { buildLive2dModel, type IsolatedRenderResult } from './lib/live2d/build';
 import { summarizeBake, type BakeSummary } from './lib/live2d/bakeSummary';
 import type { Live2dModel } from './lib/live2d/model';
+import type { DrawableDecomposition } from './lib/live2d/decomposition';
+import { surfaceTextureParts } from './lib/live2d/facialSurfaces';
+import {paintVisibilityMask} from './lib/live2d/isolatePaint';
+import type { BakeSample } from './lib/live2d/types';
 
 type MaterialState = {
     visible: boolean;
@@ -53,7 +59,7 @@ const RUNTIME_STATUS_LABELS: Record<RuntimeStatus, string> = {
     'loading-model': 'Loading PMX model…',
     'loading-textures': 'Waiting for model textures…',
     ready: 'Ready',
-    'model-error': 'Model failed to load. Check the external models directory.',
+    'model-error': '模型或贴图加载失败。请导入完整模型文件夹。',
     'wasm-loading': 'Initializing CPU raster WASM…',
     'wasm-failed': 'WASM initialization failed. Choose TypeScript fallback or retry in Advanced settings.',
     'wasm-timed-out': 'WASM initialization timed out. Choose TypeScript fallback or retry in Advanced settings.',
@@ -64,97 +70,12 @@ const ANIMATION_FRAME_SECONDS = 1 / 30;
 
 type ExportFrameProvider = (frame: number) => Promise<ExportFrameCanvases>;
 
-// Runtime assets are served from public/models. Keep the downloaded folder name
-// encoded so the Chinese model directory remains a valid URL segment.
-const MODEL_DIRECTORY = '可琳_by_绝区零_2bdf4e664d2349e13c899f884728ce53';
-const MODEL_FILE = '可琳.pmx';
-const MODEL_URL = `${import.meta.env.BASE_URL}models/${encodeURIComponent(MODEL_DIRECTORY)}/${encodeURIComponent(MODEL_FILE)}`;
-
 const VMD_ANIMATION_OPTIONS = [
     {
         label: 'Initial Pose',
         value: INITIAL_POSE_ANIMATION_VALUE,
     },
-    {
-        label: 'Aerial',
-        value: 'Aerial.vmd',
-    },
-    {
-        label: 'wavefile_v2',
-        value: 'wavefile_v2.vmd',
-    },
 ] as const;
-
-let ammoPromise: Promise<unknown> | null = null;
-
-const ensureAmmo = async () => {
-    const globalObject = globalThis as typeof globalThis & { Ammo?: unknown };
-    if (typeof globalObject.Ammo !== 'undefined') {
-        return globalObject.Ammo;
-    }
-
-    if (ammoPromise) {
-        return ammoPromise;
-    }
-
-    ammoPromise = new Promise<unknown>((resolve, reject) => {
-        const existingScript = document.querySelector<HTMLScriptElement>(
-            `script[data-ammo-loader="true"]`,
-        );
-
-        globalObject.Ammo = {
-            locateFile: (path: string) => (path.endsWith('.wasm') ? ammoWasmUrl : path),
-        };
-
-        const finalize = async () => {
-            try {
-                const ammoFactory = globalObject.Ammo as
-                    | ((config?: { locateFile?: (path: string) => string }) => Promise<unknown>)
-                    | { ready?: Promise<unknown> };
-
-                if (typeof ammoFactory === 'function') {
-                    const ammo = await ammoFactory({
-                        locateFile: (path: string) => (path.endsWith('.wasm') ? ammoWasmUrl : path),
-                    });
-                    globalObject.Ammo = ammo;
-                    resolve(ammo);
-                    return;
-                }
-
-                if (ammoFactory && typeof ammoFactory === 'object' && ammoFactory.ready) {
-                    const ammo = await ammoFactory.ready;
-                    globalObject.Ammo = ammo;
-                    resolve(ammo);
-                    return;
-                }
-
-                reject(new Error('Ammo factory did not initialize.'));
-            } catch (error) {
-                reject(error);
-            }
-        };
-
-        if (existingScript) {
-            void finalize();
-            return;
-        }
-
-        const script = document.createElement('script');
-        script.src = ammoWasmScriptUrl;
-        script.async = true;
-        script.dataset.ammoLoader = 'true';
-        script.onload = () => {
-            void finalize();
-        };
-        script.onerror = () => {
-            ammoPromise = null;
-            reject(new Error('Failed to load ammo.wasm.js script.'));
-        };
-        document.head.appendChild(script);
-    });
-
-    return ammoPromise;
-};
 
 const POSITION_KEY_EPSILON = 1e-4;
 
@@ -310,55 +231,58 @@ const buildTriangleDebugLines = (
     );
 };
 
-function App() {
+type AppProps = {
+    initialModelUrl: string;
+    initialModelName?: string;
+    initialProjectionSettings?: Partial<ProjectionOverlaySettings>;
+    initialAnimationValue?: string;
+    animationOptions?: Array<{ label: string; value: string }>;
+    resolveAssetUrl?: (url: string) => string;
+    resolveAnimationUrl?: (path: string) => string;
+    onAnimationSelection?: (path: string) => void;
+    onOperationStateChange?: (busy: boolean) => void;
+    assetPanel?: ReactNode;
+    sourceBusy?: boolean;
+};
+
+function disposeModelResources(root: THREE.Object3D) {
+    const geometries = new Set<THREE.BufferGeometry>();
+    const materials = new Set<THREE.Material>();
+    const textures = new Set<THREE.Texture>();
+    root.traverse((object) => {
+        if (!(object instanceof THREE.Mesh)) return;
+        geometries.add(object.geometry);
+        for (const material of Array.isArray(object.material) ? object.material : [object.material]) {
+            materials.add(material);
+            for (const value of Object.values(material)) {
+                if (value instanceof THREE.Texture) textures.add(value);
+            }
+        }
+        if (object instanceof THREE.SkinnedMesh) object.skeleton.dispose();
+    });
+    textures.forEach((texture) => texture.dispose());
+    materials.forEach((material) => material.dispose());
+    geometries.forEach((geometry) => geometry.dispose());
+}
+
+function App({
+    initialModelUrl, initialModelName = 'Model', initialProjectionSettings,
+    initialAnimationValue = INITIAL_POSE_ANIMATION_VALUE, animationOptions,
+    resolveAssetUrl, resolveAnimationUrl, onAnimationSelection, onOperationStateChange, assetPanel, sourceBusy = false,
+}: AppProps) {
     const mountRef = useRef<HTMLDivElement | null>(null);
     const resultPaneRef = useRef<HTMLDivElement | null>(null);
     const modelRef = useRef<THREE.Object3D | null>(null);
+    const controlsRef = useRef<{ enabled: boolean } | null>(null);
     const projectionOverlayRef = useRef<ProjectionOverlayHandle | null>(null);
     const materialStateRef = useRef(new WeakMap<THREE.Material, MaterialState>());
     const leafMaterialMapRef = useRef(new Map<string, THREE.Material>());
     const projectionPartsRef = useRef<ProjectionPartSource[]>([]);
     const projectionMaskStateRef = useRef<ProjectionMaskState | null>(null);
-    const projectionSettingsRef = useRef<ProjectionOverlaySettings>({
-        enabled: true,
-        styleMode: 'animationStable',
-        simplifyEpsilon: 0,
-        strokeWidth: 1.25,
-        showContours: false,
-        opacity: 1,
-        minTriangleCount: 1,
-        backgroundColor: '#FFA8A8',
-        outlineColor: '#51443D',
-        outlineOpacity: 0.72,
-        shadowStrength: 0.38,
-        highlightStrength: 0.24,
-        shadowThreshold: -0.30,
-        highlightThreshold: 0.62,
-        lightDirection: [0.35, 0.8, 0.45],
-        minShapeArea: 8,
-        edgeRoughness: 0.35,
-        edgeSmoothing: 'soft',
-        enableComposition: false,
-        enableShapeTracking: false,
-        enableEdgeDistortion: false,
-        compositionMode: 'vector',
-        boundaryGuard: 'outerDepthNormal',
-        depthMergeThreshold: 0.035,
-        normalMergeThreshold: 0.61,
-        gapMergeThreshold: 1.5,
-        temporalStability: 0.78,
-        globalShapeBudget: 96,
-        focusShapeBudgets: {
-            focal: 40,
-            support: 28,
-            abstract: 12,
-        },
-        mergeColorThreshold: 0.12,
-        partOverrides: {},
-        cpuRasterBackend: 'auto',
-    });
+    const projectionSettingsRef = useRef<ProjectionOverlaySettings>({...createDefaultProjectionSettings(),...initialProjectionSettings});
     const visibleLeafIdsRef = useRef<Set<string> | null>(null);
-    const selectedAnimationRef = useRef<string>(VMD_ANIMATION_OPTIONS[0].value);
+    const selectedAnimationRef = useRef<string>(initialAnimationValue);
+    const operationBusyRef = useRef(false);
     const reloadAnimationRef = useRef<(() => void) | null>(null);
     const stepBackwardStrideFramesRef = useRef<(() => void) | null>(null);
     const stepBackwardSingleFrameRef = useRef<(() => void) | null>(null);
@@ -385,7 +309,7 @@ function App() {
         projectionSettingsRef.current,
     );
     const [selectedAnimation, setSelectedAnimation] = useState<string>(
-        VMD_ANIMATION_OPTIONS[0].value,
+        initialAnimationValue,
     );
     const [animationFrameCount, setAnimationFrameCount] = useState(1);
     const [frameStride, setFrameStride] = useState(2);
@@ -393,6 +317,9 @@ function App() {
     const [live2dModel, setLive2dModel] = useState<Live2dModel | null>(null);
     const [gpuStatus, setGpuStatus] = useState<GpuStatus>('checking');
     const [assetStatus, setAssetStatus] = useState<AssetStatus>('loading-model');
+    const [assetError, setAssetError] = useState('');
+    const [animationError, setAnimationError] = useState('');
+    const [operationBusy, setOperationBusy] = useState(false);
     const [wasmSnapshot, setWasmSnapshot] = useState(() => getRasterContourClient().getSnapshot());
 
     useEffect(() => getRasterContourClient().subscribe(setWasmSnapshot), []);
@@ -422,6 +349,9 @@ function App() {
     }, []);
 
     useEffect(() => {
+        if (projectionRasterScale(projectionSettingsRef.current) !== projectionRasterScale(projectionSettings)) {
+            forceNewProjectionFrameRef.current = true;
+        }
         projectionSettingsRef.current = projectionSettings;
         // A style-only change must refresh the overlay once even when the
         // model is paused. The animation loop otherwise has no scene motion
@@ -498,6 +428,7 @@ function App() {
         mount.appendChild(renderer.domElement);
 
         const controls = new OrbitControls(camera, renderer.domElement);
+        controlsRef.current = controls;
         controls.enableDamping = true;
         controls.dampingFactor = 0.5;
         controls.target.set(0, 10, 0);
@@ -505,7 +436,16 @@ function App() {
         controls.maxDistance = 60;
         controls.enablePan = false;
 
-        const loader = new MMDLoader();
+        const manager = new THREE.LoadingManager();
+        const loader = new MMDLoader(manager);
+        const sourceUrls = new Map<string, string>();
+        if (resolveAssetUrl) {
+            manager.setURLModifier((url) => {
+                const resolved = resolveAssetUrl(url);
+                sourceUrls.set(resolved, url);
+                return resolved;
+            });
+        }
         const mmdHelper = new MMDAnimationHelper({
             afterglow: 0,
             resetPhysicsOnLoop: true,
@@ -522,6 +462,22 @@ function App() {
         let segmentationReady = false;
         let helperAttached = false;
         let animationLoadToken = 0;
+        let assetLoadFailed = false;
+        setAssetError('');
+        setAnimationError('');
+        setAssetStatus('loading-model');
+        const failAssetLoad = (error: unknown) => {
+            if (disposed) return;
+            assetLoadFailed = true;
+            setAssetStatus('model-error');
+            setAssetError(error instanceof Error ? error.message : '模型或贴图无法读取，请选择完整模型文件夹。');
+        };
+        manager.onError = (url) => {
+            if (disposed) return;
+            const original = sourceUrls.get(url) ?? url;
+            if (/\.vmd$/i.test(original)) return; // The motion callback has its own error state.
+            failAssetLoad(new Error(`无法读取模型或贴图：${original.replace(/^local-assets:\/\/[^/]+\//, '')}`));
+        };
 
         const tryAttachMmdAnimation = async () => {
             if (
@@ -536,6 +492,7 @@ function App() {
 
             const targetMesh = targetMeshForAnimation;
             const animation = pendingVmdAnimation;
+            const attachToken = animationLoadToken;
             helperAttached = true;
             currentAnimationTimeRef.current = 0;
             currentAnimationDurationRef.current = animation.duration;
@@ -565,7 +522,7 @@ function App() {
                     // ignore helper replacement cleanup errors
                 }
                 await ensureAmmo();
-                if (disposed) {
+                if (disposed || attachToken !== animationLoadToken) {
                     return;
                 }
                 mmdHelper.add(targetMesh, {
@@ -579,6 +536,7 @@ function App() {
                     trackCount: animation.tracks.length,
                 });
             } catch (error) {
+                if (disposed || attachToken !== animationLoadToken) return;
                 console.warn('Physics setup failed, falling back to animation only.', error);
                 try {
                     mmdHelper.add(targetMesh, {
@@ -605,6 +563,7 @@ function App() {
             }
 
             animationLoadToken += 1;
+            setAnimationError('');
             const currentToken = animationLoadToken;
             helperAttached = false;
             pendingVmdAnimation = null;
@@ -619,6 +578,7 @@ function App() {
             } catch {
                 // ignore helper cleanup errors during animation reload
             }
+            targetMesh.pose();
 
             if (selectedAnimationRef.current === INITIAL_POSE_ANIMATION_VALUE) {
                 targetMesh.pose();
@@ -628,7 +588,7 @@ function App() {
             }
 
             loader.loadAnimation(
-                `${import.meta.env.BASE_URL}models/vmd/${encodeURIComponent(selectedAnimationRef.current)}`,
+                resolveAnimationUrl?.(selectedAnimationRef.current) ?? selectedAnimationRef.current,
                 targetMesh,
                 (animation: THREE.AnimationClip) => {
                     if (disposed || currentToken !== animationLoadToken) {
@@ -640,9 +600,10 @@ function App() {
                 },
                 undefined,
                 (error: unknown) => {
-                    if (currentToken !== animationLoadToken) {
+                    if (disposed || currentToken !== animationLoadToken) {
                         return;
                     }
+                    setAnimationError(error instanceof Error ? `动作加载失败：${error.message}` : '动作加载失败，请重新选择 VMD 文件。');
                     console.warn('Failed to load VMD animation.', error);
                 },
             );
@@ -727,7 +688,7 @@ function App() {
         stepForwardStrideFramesRef.current = () => stepAnimationByFrames(frameStrideRef.current);
 
         const applySegmentation = (targetModel: THREE.Object3D) => {
-            const segmentation = splitModelParts(targetModel, 'Corin');
+            const segmentation = splitModelParts(targetModel, initialModelName);
             leafMaterialMapRef.current = segmentation.leafMaterialMap;
             projectionPartsRef.current = segmentation.projectionParts;
             projectionMaskStateRef.current = createProjectionMaskState(
@@ -749,14 +710,21 @@ function App() {
         };
 
         const scheduleSegmentation = (targetModel: THREE.Object3D) => {
-            setAssetStatus('loading-textures');
+            if (!assetLoadFailed) setAssetStatus('loading-textures');
+            const startedAt = performance.now();
             const attempt = () => {
-                if (disposed) {
+                if (disposed || assetLoadFailed) {
                     return;
                 }
 
                 if (areModelTexturesReady(targetModel)) {
-                    applySegmentation(targetModel);
+                    try { applySegmentation(targetModel); }
+                    catch (error) { failAssetLoad(error); }
+                    return;
+                }
+
+                if (performance.now() - startedAt > 60_000) {
+                    failAssetLoad(new Error('贴图加载超时，请检查所选模型文件夹是否包含全部贴图。'));
                     return;
                 }
 
@@ -767,14 +735,15 @@ function App() {
         };
 
         loader.load(
-            MODEL_URL,
+            initialModelUrl,
             (loadedModel: THREE.Object3D) => {
                 if (disposed) {
+                    disposeModelResources(loadedModel);
                     return;
                 }
 
                 model = loadedModel;
-                setAssetStatus('loading-textures');
+                if (!assetLoadFailed) setAssetStatus('loading-textures');
                 modelRef.current = loadedModel;
                 const currentModel = loadedModel;
                 const box = new THREE.Box3().setFromObject(currentModel);
@@ -799,7 +768,7 @@ function App() {
             },
             undefined,
             (error: unknown) => {
-                setAssetStatus('model-error');
+                failAssetLoad(error);
                 console.error('Failed to load PMX model.', error);
             },
         );
@@ -1004,7 +973,7 @@ function App() {
             if (!playbackPausedRef.current && model && 'update' in model && typeof model.update === 'function') {
                 model.update(delta);
             }
-            const controlsChanged = controls.update();
+            const controlsChanged = operationBusyRef.current ? false : controls.update();
             renderer.render(scene, camera);
             const resultPane = resultPaneRef.current;
             const resultWidth = resultPane?.clientWidth ?? 0;
@@ -1027,18 +996,20 @@ function App() {
                     lastSubmittedProjectionFrameId >= 0;
                 const renderFrameId = reuseProjectionFrame
                     ? lastSubmittedProjectionFrameId
-                    : projectionFrameId;
+                    : webGpuProjector.allocateFrameId();
                 submittedProjectionTick = projectionTick;
                 forceProjectionRefreshRef.current = false;
                 forceNewProjectionFrameRef.current = false;
                 if (!reuseProjectionFrame) {
-                    lastSubmittedProjectionFrameId = projectionFrameId;
+                    lastSubmittedProjectionFrameId = renderFrameId;
                     webGpuProjector.requestFrame(
                         projectionPartsRef.current,
                         camera,
-                        resultWidth,
-                        resultHeight,
+                        resultWidth * projectionRasterScale(projectionSettingsRef.current),
+                        resultHeight * projectionRasterScale(projectionSettingsRef.current),
                         renderFrameId,
+                        undefined,
+                        projectionSettingsRef.current.useAuthoredNormals,
                     );
                 }
                 projectionOverlayRef.current?.renderFrame(
@@ -1081,55 +1052,60 @@ function App() {
             // serves every drawable; falls back to the raw 3D isolated render
             // when the 2D pipeline is unavailable.
             let neutralFrame: Awaited<ReturnType<typeof webGpuProjector.getFrame>> = null;
-            const TEXTURE_FRAME_ID_BASE = 2_000_000;
+            let neutralShaped: Awaited<ReturnType<typeof shapeProjectedParts>> = null;
+            let textureFrameId = webGpuProjector.allocateFrameId();
             const renderDrawable2D = async (
                 leafIds: string[],
                 isoCamera: THREE.PerspectiveCamera,
                 viewport: { width: number; height: number },
+                drawable?: DrawableDecomposition,
+                neutral?: BakeSample,
             ): Promise<IsolatedRenderResult | null> => {
                 try {
                     if (!neutralFrame) {
-                        webGpuProjector.requestFrame(bakeParts, isoCamera, viewport.width, viewport.height, TEXTURE_FRAME_ID_BASE);
-                        const ready = await webGpuProjector.waitForFrame(TEXTURE_FRAME_ID_BASE);
+                        webGpuProjector.requestFrame(bakeParts, isoCamera, viewport.width, viewport.height, textureFrameId, undefined, true);
+                        const ready = await webGpuProjector.waitForFrame(textureFrameId);
                         if (!ready) {
                             return null;
                         }
-                        neutralFrame = webGpuProjector.getFrame(TEXTURE_FRAME_ID_BASE);
+                        neutralFrame = webGpuProjector.getFrame(textureFrameId);
                         if (!neutralFrame) {
                             return null;
                         }
                     }
 
                     const settings = { ...projectionSettingsRef.current };
-                    const shaped = await shapeProjectedParts(
-                        bakeParts,
+                    const surfaceParts = drawable?.surfaceTexture && neutral ? surfaceTextureParts(bakeParts, drawable, neutral, viewport.width/neutral.viewport.width) : null;
+                    const shaped = surfaceParts ? await shapeProjectedParts(
+                        surfaceParts,
                         maskState,
                         settings,
-                        new Set(leafIds),
+                        null,
                         neutralFrame,
-                    );
-                    if (!shaped || shaped.shapes.length === 0) {
-                        return null;
-                    }
+                    ) : neutralShaped ?? await shapeProjectedParts(bakeParts, maskState, settings, null, neutralFrame);
+                    if (!shaped) return null;
+                    if (!surfaceParts) neutralShaped = shaped;
+                    const selectedShapes = shaped.shapes.filter(s=>leafIds.includes(s.sourceLeafId));
+                    if (!selectedShapes.length) return {rgba:new Uint8Array(viewport.width*viewport.height*4),width:viewport.width,height:viewport.height};
 
                     const composedShapes = settings.enableComposition
                         ? composeProjectedShapes(
-                              shaped.shapes,
+                              selectedShapes,
                               maskState.sharedChains,
                               settings,
                               viewport.width,
                               viewport.height,
                           )
-                        : shaped.shapes;
+                        : selectedShapes;
                     const modeDefaults = getStyleModeDefaults(settings.styleMode);
                     const filteredShapes = filterSmallProjectedPartShapes(
                         composedShapes,
-                        settings.minShapeArea * modeDefaults.minShapeAreaScale,
+                        surfaceParts ? 0 : settings.minShapeArea * modeDefaults.minShapeAreaScale,
                         settings.enableComposition ? { focal: 0.05, support: 1, abstract: 1.65 } : {},
                         settings.enableComposition,
                     );
                     if (filteredShapes.length === 0) {
-                        return null;
+                        return {rgba:new Uint8Array(viewport.width*viewport.height*4),width:viewport.width,height:viewport.height};
                     }
 
                     const offscreen = document.createElement('canvas');
@@ -1157,6 +1133,26 @@ function App() {
                     }
                     context.drawImage(offscreen, 0, 0, viewport.width, viewport.height);
                     const data = context.getImageData(0, 0, viewport.width, viewport.height).data;
+                    const visibilityCanvas=document.createElement('canvas');
+                    const maskSettings={...settings,showContours:false,shadowStrength:0,highlightStrength:0,opacity:1};
+                    await compose2DRenderOverlay(visibilityCanvas,paintVisibilityMask(shaped.shapes,new Set(leafIds)),viewport.width,viewport.height,maskSettings,shaped.depthAtlas,{transparent:true});
+                    context.clearRect(0,0,viewport.width,viewport.height);
+                    context.drawImage(visibilityCanvas,0,0,viewport.width,viewport.height);
+                    const visibility=context.getImageData(0,0,viewport.width,viewport.height).data;
+                    for(let p=0;p<data.length;p+=4)data[p+3]=Math.round(data[p+3]*(visibility[p+3]>0?visibility[p]/255:0));
+                    // Eye surfaces get complete local paint; the original layer
+                    // retains its established appearance everywhere else.
+                    const overlay=drawable?.surfaceTexture||drawable?.foregroundOnly;
+                    const regions=overlay?drawable?.textureRevealRegions:drawable?.textureCutoutRegions;
+                    if(regions?.length&&neutral){
+                        const scale=viewport.width/neutral.viewport.width;
+                        for(let y=0;y<viewport.height;y++)for(let x=0;x<viewport.width;x++){
+                            const bleed=overlay?2:0;
+                            const inside=regions.some(r=>x>=r.x0*scale-bleed&&x<r.x1*scale+bleed&&y>=r.y0*scale-bleed&&y<r.y1*scale+bleed);
+                            const covered=!drawable?.textureCoverage||drawable.textureCoverage[Math.floor(y/scale)*neutral.viewport.width+Math.floor(x/scale)];
+                            if(overlay?(!inside||!covered):inside){const p=(y*viewport.width+x)*4;data[p]=data[p+1]=data[p+2]=data[p+3]=0;}
+                        }
+                    }
                     const rgba = new Uint8Array(data.length);
                     const rowBytes = viewport.width * 4;
                     for (let row = 0; row < viewport.height; row += 1) {
@@ -1215,8 +1211,9 @@ function App() {
                     parts: bakeParts,
                     camera,
                     projector: webGpuProjector,
-                    modelName: 'Corin',
+                    modelName: initialModelName,
                     renderDrawable2D,
+                    onTexturePassStart:()=>{neutralFrame=null;neutralShaped=null;textureFrameId=webGpuProjector.allocateFrameId();},
                     renderIsolated,
                     onProgress,
                     textureScale,
@@ -1254,6 +1251,7 @@ function App() {
             }
             modelRef.current = null;
             leafMaterialMapRef.current.clear();
+            webGpuProjector.releaseMeshes(projectionPartsRef.current.map((part) => part.mesh));
             projectionPartsRef.current = [];
             projectionMaskStateRef.current = null;
             window.removeEventListener('resize', onResize);
@@ -1261,10 +1259,13 @@ function App() {
             renderer.domElement.removeEventListener('pointerup', onPointerUp);
             renderer.domElement.removeEventListener('contextmenu', onContextMenu);
             controls.dispose();
+            controlsRef.current = null;
+            renderer.setAnimationLoop(null);
+            if (model) disposeModelResources(model);
             renderer.dispose();
             mount.removeChild(renderer.domElement);
         };
-    }, []);
+    }, [initialModelUrl, initialModelName, resolveAssetUrl, resolveAnimationUrl]);
 
     const handleExportVideo = async (
         settings: ExportVideoSettings,
@@ -1272,9 +1273,14 @@ function App() {
         signal: AbortSignal,
     ) => {
         const frameProvider = exportFrameRef.current;
-        if (!frameProvider) {
+        if (!frameProvider || assetStatus !== 'ready') {
             throw new Error('The model and projection are not ready for export.');
         }
+        if (sourceBusy || operationBusyRef.current) throw new Error('请等待当前素材保存、烘焙或导出完成。');
+        operationBusyRef.current = true;
+        setOperationBusy(true);
+        onOperationStateChange?.(true);
+        if (controlsRef.current) controlsRef.current.enabled = false;
 
         const previousPaused = playbackPausedRef.current;
         const previousTime = currentAnimationTimeRef.current;
@@ -1286,6 +1292,10 @@ function App() {
             setAnimationTimeRef.current?.(previousTime);
             playbackPausedRef.current = previousPaused;
             setIsPlaybackPaused(previousPaused);
+            operationBusyRef.current = false;
+            setOperationBusy(false);
+            onOperationStateChange?.(false);
+            if (controlsRef.current) controlsRef.current.enabled = true;
         }
     };
 
@@ -1294,12 +1304,24 @@ function App() {
         textureScale: number,
     ): Promise<BakeSummary> => {
         const runner = buildLive2dRef.current;
-        if (!runner) {
+        if (!runner || assetStatus !== 'ready') {
             throw new Error('The scene is not ready for building.');
         }
-        const { model, summary } = await runner(onProgress, textureScale);
-        setLive2dModel(model);
-        return summary;
+        if (sourceBusy || operationBusyRef.current) throw new Error('请等待当前素材保存、烘焙或导出完成。');
+        operationBusyRef.current = true;
+        setOperationBusy(true);
+        onOperationStateChange?.(true);
+        if (controlsRef.current) controlsRef.current.enabled = false;
+        try {
+            const { model, summary } = await runner(onProgress, textureScale);
+            setLive2dModel(model);
+            return summary;
+        } finally {
+            operationBusyRef.current = false;
+            setOperationBusy(false);
+            onOperationStateChange?.(false);
+            if (controlsRef.current) controlsRef.current.enabled = true;
+        }
     };
 
     const baseRuntimeStatus: RuntimeStatus = gpuStatus === 'ready' ? assetStatus : gpuStatus;
@@ -1316,23 +1338,29 @@ function App() {
     return (
         <div className="app-shell">
             <PartPanel
+                assetPanel={assetPanel}
+                operationBusy={operationBusy}
                 parts={parts}
                 debugMaterials={debugMaterials}
                 selectedPartId={selectedPartId}
                 projectionSettings={projectionSettings}
-                animationOptions={[...VMD_ANIMATION_OPTIONS]}
+                animationOptions={animationOptions ?? [...VMD_ANIMATION_OPTIONS]}
                 selectedAnimation={selectedAnimation}
                 isPlaybackPaused={isPlaybackPaused}
                 frameStride={frameStride}
-                onAnimationChange={setSelectedAnimation}
+                onAnimationChange={(value) => {
+                    if (operationBusyRef.current) return;
+                    setSelectedAnimation(value);
+                    onAnimationSelection?.(value);
+                }}
                 onTogglePlaybackPaused={() => setIsPlaybackPaused((current) => !current)}
                 onStepBackwardStrideFrames={() => stepBackwardStrideFramesRef.current?.()}
                 onStepBackwardSingleFrame={() => stepBackwardSingleFrameRef.current?.()}
                 onStepForwardSingleFrame={() => stepForwardSingleFrameRef.current?.()}
                 onStepForwardStrideFrames={() => stepForwardStrideFramesRef.current?.()}
                 onFrameStrideChange={setFrameStride}
-                onSelect={setSelectedPartId}
-                onProjectionSettingsChange={setProjectionSettings}
+                onSelect={(value) => { if (!operationBusyRef.current) setSelectedPartId(value); }}
+                onProjectionSettingsChange={(value) => { if (!operationBusyRef.current) setProjectionSettings(value); }}
                 wasmSnapshot={wasmSnapshot}
                 animationFrameCount={animationFrameCount}
                 onExportVideo={handleExportVideo}
@@ -1342,12 +1370,13 @@ function App() {
             />
             <div className="viewport-pane">
                 <div ref={mountRef} className="viewport" />
+                {animationError && <div className="asset-animation-error" role="alert">{animationError}</div>}
             </div>
             <div ref={resultPaneRef} className="result-pane">
                 <ProjectionOverlay ref={projectionOverlayRef} />
                 {runtimeStatus !== 'ready' ? (
                     <div className="runtime-status" role="status">
-                        {RUNTIME_STATUS_LABELS[runtimeStatus]}
+                        {assetError || RUNTIME_STATUS_LABELS[runtimeStatus]}
                     </div>
                 ) : null}
             </div>

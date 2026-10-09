@@ -18,6 +18,7 @@ type GeometryGroup = {
 };
 
 type TriangleRecord = {
+    textureAlpha: number;
     id: string;
     vertexIndices: [number, number, number];
     vertexPositionKeys: [string, string, string];
@@ -68,6 +69,12 @@ export type ProjectionTriangleSource = {
 };
 
 export type ProjectionPartSource = {
+    /** Original draw side and segmented material, used before depth visibility. */
+    materialSide?: THREE.Side;
+    materialIndex?: number;
+    textureOpacity?: number;
+    /** Visible-region experiment has already decided which small regions survive. */
+    preserveSmallPaintRegions?: boolean;
     /** Original material alpha; undefined means opaque for legacy sources. */
     opacity?: number;
     leafId: string;
@@ -691,10 +698,12 @@ const getTriangleColor = (
     const materialColor = texturedMaterial.color?.clone() ?? new THREE.Color(1, 1, 1);
 
     if (uvAttribute && textureReader) {
+        let alpha = 0;
         const rgb = averageRgb(
             getTriangleSampleUvs(uvAttribute, vertexIndices).map((uv) => {
                 texturedMaterial.map?.transformUv(uv);
                 const sampled = textureReader(uv.x, uv.y);
+                alpha += sampled.a / 255;
                 return [
                     Math.round((sampled.r / 255) * materialColor.r * 255),
                     Math.round((sampled.g / 255) * materialColor.g * 255),
@@ -702,7 +711,7 @@ const getTriangleColor = (
                 ] as [number, number, number];
             }),
         );
-        return { rgb, label: colorLabelFromKey(colorKeyFromRgb(...rgb)) };
+        return { rgb, alpha: alpha / TRIANGLE_INTERIOR_SAMPLE_BARYCENTRICS.length, label: colorLabelFromKey(colorKeyFromRgb(...rgb)) };
     }
 
     const rgb: [number, number, number] = [
@@ -710,7 +719,7 @@ const getTriangleColor = (
         Math.round(materialColor.g * 255),
         Math.round(materialColor.b * 255),
     ];
-    return { rgb, label: colorLabelFromColor(materialColor) };
+    return { rgb, alpha: 1, label: colorLabelFromColor(materialColor) };
 };
 
 export const getTriangleSampleDebugInfo = (
@@ -1154,6 +1163,7 @@ const buildMeshSegmentation = (
             const color = getTriangleColor(uvAttribute, material, vertexIndices);
             const triangleId = `${mesh.uuid}-g${groupIndex}-t${offset}`;
             const triangle: TriangleRecord = {
+                textureAlpha: color.alpha,
                 id: triangleId,
                 vertexIndices,
                 vertexPositionKeys: [
@@ -1214,6 +1224,9 @@ const buildMeshSegmentation = (
                 });
                 if (cluster.triangles.length >= 1) {
                     projectionParts.push({
+                        materialSide: material.side,
+                        materialIndex: nextMaterials.length - 1,
+                        textureOpacity: cluster.triangles.reduce((sum, triangle) => sum + triangle.textureAlpha, 0) / cluster.triangles.length,
                         opacity: material.opacity,
                         leafId,
                         label: materialName,

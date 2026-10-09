@@ -4,6 +4,7 @@ import { buildMoc3, buildMoc3Archive, packTextureAtlas } from './moc3';
 import type { Live2dDrawable, Live2dModel } from './model';
 import type { FaceParamId } from './types';
 import { parseZip } from './zip';
+import {createModelPoseEvaluator} from './anchoredHeadRig';
 
 /**
  * Structural self-checks against the layout reverse-engineered from the
@@ -150,6 +151,31 @@ const buildReader = (bytes: Uint8Array) => {
 };
 
 describe('moc3 writer structure', () => {
+    it('exports a composed evaluator and retains its otherwise missing head dependencies',()=>{
+        const fixture=buildFixtureModel();
+        const result=buildMoc3(fixture,{requiredParameters:[[],['ParamAngleY','ParamAngleZ']],poseEvaluator:{familyIds:PARAM_IDS,evaluate:(assignment,outputs)=>{
+            fixture.drawables.forEach((d,i)=>outputs[i].set(d.neutralPositions));
+            outputs[1][0]+=assignment.ParamAngleY??0;outputs[1][1]+=assignment.ParamAngleZ??0;
+        }}});
+        expect(result.keyformCounts).toEqual([3,27]);
+        const r=buildReader(result.moc3),firstHead=r.s32(r.slot(SLOT.amKfKpBegins)+3*4);
+        expect(r.f32(r.slot(SLOT.kfPos)+firstHead*4)).toBeCloseTo(-.4,6);
+        expect(r.f32(r.slot(SLOT.kfPos)+(firstHead+1)*4)).toBeCloseTo(-.7,6);
+    });
+    it('keeps the default export bytes unchanged and checks a requested larger tensor budget',()=>{
+        const fixture=buildFixtureModel();
+        expect(buildMoc3(fixture).moc3).toEqual(buildMoc3(fixture,{requiredParameters:[],maxKeyformsPerArtmesh:2187}).moc3);
+        const options={angleKeys:[-30,-20,-10,0,10,20,30],requiredParameters:[[],PARAM_IDS]};
+        expect(()=>buildMoc3(fixture,options)).toThrow('export budget');
+        expect(buildMoc3(fixture,{...options,maxKeyformsPerArtmesh:3000}).keyformCounts[1]).toBe(2744);
+    });
+    it('retains subtle blink bindings even on a large mixed body and face drawable',()=>{
+        const fixture=buildFixtureModel();fixture.drawables=[drawable({id:'mixed',neutralPositions:Float32Array.from([0,0,4000,0,0,4000])})];fixture.order=['mixed'];fixture.jointKeyforms=[];
+        fixture.families={ParamEyeLOpen:{family:'ParamEyeLOpen',default:1,values:[0,.5,1],displacements:[Float32Array.from([0,.2,0,0,0,0]),Float32Array.from([0,.1,0,0,0,0]),new Float32Array(6)]}};
+        expect(buildMoc3(fixture).keyformCounts[0]).toBeGreaterThanOrEqual(3);
+        const read=buildReader(buildMoc3(fixture).moc3);const eye=fixture.params.findIndex(p=>p.id==='ParamEyeLOpen');
+        expect(read.u32(read.slot(SLOT.paramsPbsc)+eye*4)).toBe(1);
+    });
     const model = buildFixtureModel();
     const { moc3, keyformCounts } = buildMoc3(model);
     const read = buildReader(moc3);
@@ -303,6 +329,11 @@ describe('moc3 writer structure', () => {
         expect(inverted[buildReader(inverted).slot(SLOT.amFlags) + 1]).toBe(12);
         // count table row 17 (drawable masks) = 1 pool entry.
         expect(read.u32(read.slot(SLOT.countInfo) + 17 * 4)).toBe(1);
+    });
+    it('culls back-facing skin when an invisible drawable generates eye occlusion',()=>{
+        const model=buildFixtureModel();model.drawables[0].maskOnly=true;
+        const {moc3}=buildMoc3(model);
+        expect(moc3[buildReader(moc3).slot(SLOT.amFlags)]&4).toBe(0);
     });
 
     it('keeps the neutral stacking at every AngleX cell (no dynamic reordering)', () => {
@@ -555,6 +586,12 @@ const uvBounds = (uvs: Float32Array[]): number => {
 };
 
 describe('moc3 archive', () => {
+    it('automatically exports the stored anatomical rig with the validated grid',()=>{
+        const model=buildFixtureModel();model.params=model.params.map(p=>p.id.startsWith('ParamAngle')?{...p,min:-15,max:15}:p);
+        model.headRig={rig:{pivot:[20,40],neckBase:[20,50],projectionCenter:[100,100],focal:500,distance:10,frontDepth:.5,faceBounds:[10,20,30,40],basis:[0,0,0,1],pitchScale:.65},weights:model.drawables.map((d,i)=>new Float32Array(d.vertexCount).fill(i?1:0)),angleKeys:[-15,0,15]};
+        const auto=buildMoc3(model),explicit=buildMoc3({...model,headRig:undefined},{angleKeys:[-15,0,15],poseEvaluator:createModelPoseEvaluator(model),requiredParameters:model.headRig.weights.map(w=>w.some(v=>v>0)?['ParamAngleX','ParamAngleY','ParamAngleZ']:[])});
+        expect(auto.moc3).toEqual(explicit.moc3);expect(auto.moc3).not.toEqual(buildMoc3({...model,headRig:undefined},{angleKeys:[-15,0,15]}).moc3);
+    });
     it('bundles a VTS-shaped folder: moc3, atlas png, and model3.json', () => {
         const archive = buildMoc3Archive(buildFixtureModel(), () => new Uint8Array([1, 2, 3]));
         const files = parseZip(archive);

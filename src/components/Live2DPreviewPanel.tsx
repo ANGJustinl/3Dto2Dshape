@@ -55,6 +55,9 @@ const Live2DPreviewPanel = ({ model, onImportModel }: Live2DPreviewPanelProps) =
         runtimeRef.current = runtime;
         setMotion(null);
         setPlaying(false);
+        setExpression(null);
+        playTimeRef.current=0;
+        setAssignment(Object.fromEntries(model.params.map(p=>[p.id,p.default])) as ParamAssignment);
         return () => {
             runtimeRef.current = null;
             runtime.dispose();

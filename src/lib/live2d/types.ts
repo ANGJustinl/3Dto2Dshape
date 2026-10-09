@@ -92,6 +92,8 @@ export type BakeSample = {
 
 /** Static part data copied from ProjectionPartSource; pose-independent. */
 export type BakePartSnapshot = {
+    /** Vertices weighted at least 80% to the resolved head bone or descendants. */
+    headVertexIndices?: number[];
     leafId: string;
     label: string;
     meshId: string;

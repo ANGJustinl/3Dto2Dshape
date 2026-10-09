@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import type { Live2dModel } from './model';
 import { exportModel, importModel, verifyRoundtripBytes, type PngCodec } from './serialize';
 import { createZip, parseZip } from './zip';
+import {createModelPoseEvaluator} from './anchoredHeadRig';
+import type {ParamAssignment} from './types';
 
 /**
  * The PNG codec is stubbed at byte level: encode wraps raw RGBA in a length
@@ -103,9 +105,20 @@ describe('store zip', () => {
 });
 
 describe('live2d model serialization', () => {
+    it('retains anatomical deformation after saving and reopening, and rejects corrupt weight buffers',async()=>{
+        const model=buildModel();model.params[0]={...model.params[0],min:-15,max:15};model.textureScale=2;
+        model.headRig={rig:{pivot:[5,10],neckBase:[5,12],projectionCenter:[5,15],focal:50,distance:10,frontDepth:.5,faceBounds:[0,0,10,10],basis:[0,0,0,1],pitchScale:.65},weights:[Float32Array.from([0,.3,.8,1])],angleKeys:[-15,0,15]};
+        const bytes=exportModel(model,stubCodec),copy=await importModel(bytes,stubCodec);expect(copy.headRig).toEqual(model.headRig);expect(copy.textureScale).toBe(2);
+        const a=[new Float32Array(8)],b=[new Float32Array(8)],pose={ParamAngleX:10,ParamAngleY:5,ParamAngleZ:-5} as ParamAssignment;
+        createModelPoseEvaluator(model).evaluate(pose,a);createModelPoseEvaluator(copy).evaluate(pose,b);expect(b).toEqual(a);expect(a[0][0]).toBe(0);
+        const files=parseZip(bytes);files.set('head-weights/0.bin',new Uint8Array(8));await expect(importModel(createZip([...files].map(([name,data])=>({name,data}))),stubCodec)).rejects.toThrow('Invalid anatomical head weights');
+        files.set('head-weights/0.bin',new Uint8Array(Float32Array.from([NaN,0,0,0]).buffer));await expect(importModel(createZip([...files].map(([name,data])=>({name,data}))),stubCodec)).rejects.toThrow('Anatomical weights');
+    });
     it('retains joint grids and resolved mask IDs through a roundtrip', async () => {
         const model = buildModel();
         model.drawables[0].maskIds = ['mouth-mask'];
+        model.drawables[0].maskOnly = true;
+        model.drawables[0].alphaCorrectFiltering = true;
         model.jointKeyforms = [{
             x: { family: 'ParamAngleX', default: 0, values: [-30, 0, 30] },
             y: { family: 'ParamAngleY', default: 0, values: [-30, 0, 30] },
@@ -114,6 +127,8 @@ describe('live2d model serialization', () => {
         const copy = await importModel(exportModel(model, stubCodec), stubCodec);
         expect(copy.jointKeyforms).toEqual(model.jointKeyforms);
         expect(copy.drawables[0].maskIds).toEqual(['mouth-mask']);
+        expect(copy.drawables[0].maskOnly).toBe(true);
+        expect(copy.drawables[0].alphaCorrectFiltering).toBe(true);
         expect(verifyRoundtripBytes(model, copy).filter((p) => !p.includes('render order'))).toEqual([]);
     });
     it('exports and re-imports into an identical model', async () => {

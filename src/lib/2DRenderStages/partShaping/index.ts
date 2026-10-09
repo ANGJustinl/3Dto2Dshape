@@ -13,6 +13,23 @@ import { buildProjectedPartShapeFromRasterData } from './partAssembler';
 import { getPaintLayerForShade, shadeColorForLayer } from '../../2DRenderShared/paintStyle';
 import { resolvePartStyle, type ResolvedPartStyle } from '../../2DRenderShared/focusResolver';
 import { getRasterContourClient } from '../../wasm/rasterContourClient';
+import { TemporalPaintState } from '../../2DRenderPipeline/temporalPaint';
+import { isProtectedPaintDetail } from '../../2DRenderPipeline/visibleRegions';
+type ProbePart = {part: ProjectionPartSource; raster: RasterizedPartData | null; shape: import('../../2DRenderShared/types').ProjectedPartShape | null};
+let lastProbe: ProbePart[] = [];
+const insideLoops = (loops: Array<Array<{x:number;y:number}>>, x:number, y:number) => {
+    let inside=false;
+    for(const loop of loops) for(let i=0,j=loop.length-1;i<loop.length;j=i++){
+        const a=loop[i],b=loop[j];if((a.y>y)!==(b.y>y)&& x < (b.x-a.x)*(y-a.y)/(b.y-a.y)+a.x)inside=!inside;
+    }
+    return inside;
+};
+export const inspectProjectionPixels = (pixels: Array<[number,number]>) => pixels.map(([x,y])=>({x,y,candidates:lastProbe.flatMap(({part,raster,shape})=>{
+    if(!raster)return[];const lx=Math.floor(x)-raster.offsetX,ly=Math.floor(y)-raster.offsetY;
+    if(lx<0||ly<0||lx>=raster.width||ly>=raster.height)return[];
+    const i=ly*raster.width+lx;if(!Number.isFinite(raster.depth[i]))return[];
+    return[{leaf:part.leafId,label:part.label,layer:part.paintLayer,color:part.color,alpha:part.opacity,depth:raster.depth[i],occupied:raster.occupied[i],loopCount:raster.loops?.length,rawInside:raster.loops?insideLoops(raster.loops,x,y):null,shape:!!shape,inside:shape?insideLoops(shape.loops,x,y):false,nearestDepth:shape?.depth}];
+}).sort((a,b)=>a.depth-b.depth)}));
 
 const projectPointDepth = (
     projectionCache: MeshProjectionCache,
@@ -49,6 +66,7 @@ export const buildPaintLayerParts = (
     projectionCache: MeshProjectionCache,
     settings: ProjectionOverlaySettings,
     resolvedStyle: ResolvedPartStyle,
+    temporalPaint?: TemporalPaintState,
 ) => {
     const lightDirection = new THREE.Vector3(...settings.lightDirection).normalize();
     const trianglesByLayer = new Map<ReturnType<typeof getPaintLayerForShade>, ProjectionPartSource['triangles']>();
@@ -57,13 +75,19 @@ export const buildPaintLayerParts = (
     const fixedEyeShadow = [part.label, ...part.materialNames].some(name =>
         /^(目影|眼影|eye[ _-]?shadow)(?:$|[\s_.-])/i.test(name.trim()));
 
-    part.triangles.forEach((triangle) => {
-        const layer = fixedEyeShadow ? 'base' : getPaintLayerForShade(
+    const experimentalLayers = !fixedEyeShadow && (settings.useAuthoredNormals || (settings.flickerControl &&
+        (settings.flickerControl.shadeHysteresis > 0 || settings.flickerControl.normalSmoothing > 0 || settings.flickerControl.regionHysteresis > 0)))
+        ? (temporalPaint ?? new TemporalPaintState()).classifyPart(part, projectionCache, settings, resolvedStyle) : null;
+    const assignments: ReturnType<typeof getPaintLayerForShade>[] = [];
+    part.triangles.forEach((triangle, index) => {
+        const layer = fixedEyeShadow ? 'base' : experimentalLayers?.[index] ?? getPaintLayerForShade(
             getTriangleShade(projectionCache, triangle.vertexIndices, lightDirection), settings);
+        assignments.push(layer);
         const layerTriangles = trianglesByLayer.get(layer) ?? [];
         layerTriangles.push(triangle);
         trianglesByLayer.set(layer, layerTriangles);
     });
+    if (!experimentalLayers) temporalPaint?.observePart(part, assignments);
 
     const layers: ProjectionPartSource[] = [];
     (['shadow', 'base', 'highlight'] as const).forEach((paintLayer) => {
@@ -95,11 +119,14 @@ const applyGlobalDepthVisibility = (
     rasterResults: Array<GpuRasterizedPartData | null>,
     viewportWidth: number,
     viewportHeight: number,
+    tolerance = 0.0005,
+    opacities?: number[],
 ) => {
     const globalDepth = new Float32Array(viewportWidth * viewportHeight);
     globalDepth.fill(Number.POSITIVE_INFINITY);
 
-    rasterResults.forEach((rasterData) => {
+    rasterResults.forEach((rasterData, partIndex) => {
+        if (opacities && opacities[partIndex] < 0.9999) return;
         if (!rasterData) {
             return;
         }
@@ -153,7 +180,7 @@ const applyGlobalDepthVisibility = (
                 }
 
                 const globalDepthValue = globalDepth[screenY * viewportWidth + screenX];
-                if (rasterData.depth[localIndex] > globalDepthValue + 0.0005) {
+                if (rasterData.depth[localIndex] > globalDepthValue + tolerance) {
                     rasterData.occupied[localIndex] = 0;
                 }
             }
@@ -190,14 +217,18 @@ export const shapeProjectedParts = async (
     settings: ProjectionOverlaySettings,
     visibleLeafIds: Set<string> | null,
     frame: ProjectionFrameResult,
+    temporalPaint?: TemporalPaintState,
 ) => {
     if (!state) {
         return null;
     }
 
     const totalStart = performance.now();
+    temporalPaint?.beginFrame(settings, frame.sampleTime ?? performance.now() / 1000, frame.width, frame.height);
     const filteredParts = parts.filter(
         (part) =>
+            (!settings.respectMaterialVisibility || (part.materialIndex !== undefined && Array.isArray(part.mesh.material)
+                ? part.mesh.material[part.materialIndex]?.opacity ?? part.opacity ?? 1 : part.opacity ?? 1) * (settings.sampleTextureAlpha ? part.textureOpacity ?? 1 : 1) > 0.001) &&
             part.triangleCount >= Math.max(1, settings.minTriangleCount) &&
             (visibleLeafIds ? visibleLeafIds.has(part.leafId) : true),
     );
@@ -220,7 +251,20 @@ export const shapeProjectedParts = async (
 
             const resolvedStyle = resolvePartStyle(part, projectionCache, settings);
 
-            return buildPaintLayerParts(part, projectionCache, settings, resolvedStyle).map((paintPart) => {
+            return buildPaintLayerParts(part, projectionCache, settings, resolvedStyle, temporalPaint).flatMap((sourcePaintPart) => {
+                let paintPart = sourcePaintPart;
+                if (settings.respectMaterialVisibility) {
+                    const side = part.materialSide ?? THREE.DoubleSide;
+                    const triangles = side === THREE.DoubleSide ? paintPart.triangles : paintPart.triangles.filter(({vertexIndices: [a, b, c]}) => {
+                        // Screen Y points down, so front faces have negative signed area.
+                        const area = (projectionCache.screenX[b] - projectionCache.screenX[a]) * (projectionCache.screenY[c] - projectionCache.screenY[a]) -
+                            (projectionCache.screenY[b] - projectionCache.screenY[a]) * (projectionCache.screenX[c] - projectionCache.screenX[a]);
+                        return side === THREE.BackSide ? area > 0 : area < 0;
+                    });
+                    if (!triangles.length) return [];
+                    const material = part.materialIndex !== undefined && Array.isArray(part.mesh.material) ? part.mesh.material[part.materialIndex] : null;
+                    paintPart = {...paintPart, triangles, triangleCount: triangles.length, opacity: (material?.opacity ?? part.opacity ?? 1) * (settings.sampleTextureAlpha ? part.textureOpacity ?? 1 : 1)};
+                }
                 const fallbackDepth =
                     paintPart.triangles[0]?.vertexIndices !== undefined
                         ? (projectPointDepth(projectionCache, paintPart.triangles[0].vertexIndices[0]) +
@@ -229,11 +273,11 @@ export const shapeProjectedParts = async (
                           3
                         : Number.POSITIVE_INFINITY;
 
-                return {
+                return [{
                     part: paintPart,
                     projectionCache,
                     fallbackDepth,
-                };
+                }];
             });
         });
     const prepareMs = performance.now() - prepareStart;
@@ -246,26 +290,56 @@ export const shapeProjectedParts = async (
             frame.width,
             frame.height,
             buildWasmRasterInputs(preparedParts),
+            settings.flickerControl?.reuseOutputCapacity,
+            settings.depthVisibilityTolerance !== undefined ? {tolerance: settings.depthVisibilityTolerance, opacities: preparedParts.map(p => p.part.opacity ?? 1)} : undefined,
         );
         if (!wasmResult) {
             return null;
         }
         rasterResults = wasmResult.parts;
+        if (settings.depthVisibilityTolerance !== undefined && !wasmResult.nativeVisibility) {
+            applyGlobalDepthVisibility(rasterResults, frame.width, frame.height, settings.depthVisibilityTolerance);
+            rasterResults.forEach(result => {if (result) result.loops = undefined;});
+        }
         const rasterizer = getGpuPartRasterizer();
         depthAtlas = await rasterizer.uploadDepthAtlasFromRasterData(rasterResults);
     } else {
         const rasterizer = getGpuPartRasterizer();
         rasterResults = await rasterizer.rasterizeBatch(preparedParts);
-        applyGlobalDepthVisibility(rasterResults, frame.width, frame.height);
+        applyGlobalDepthVisibility(rasterResults, frame.width, frame.height, settings.depthVisibilityTolerance,
+            settings.respectMaterialVisibility ? preparedParts.map(p => p.part.opacity ?? 1) : undefined);
         depthAtlas = rasterizer.getDepthAtlasState();
     }
     const rasterMs = performance.now() - rasterStart;
+
+    const visibleStart = performance.now();
+    const visibleMinimum = settings.flickerControl?.visibleMinArea ?? 0;
+    if (visibleMinimum > 0 && temporalPaint) {
+        const sourceParts = new Map(filteredParts.map(part => [part.leafId, part]));
+        // All masks have already passed global depth visibility. Reuse their depth atlas for base fills.
+        const initialCount = preparedParts.length;
+        for (let index = 0; index < initialCount; index += 1) {
+            const prepared = preparedParts[index], raster = rasterResults[index];
+            const source = sourceParts.get(prepared.part.sourceLeafId ?? prepared.part.leafId);
+            const layer = prepared.part.paintLayer ?? 'base';
+            if (!raster || !source || layer === 'base' || isProtectedPaintDetail(prepared.part)) continue;
+            const result = temporalPaint.visibleRegions.process(source, layer, raster, prepared.projectionCache, visibleMinimum, settings.flickerControl?.visibleHysteresis ?? .35);
+            prepared.part = { ...prepared.part, preserveSmallPaintRegions: true };
+            rasterResults[index] = result.kept;
+            if (result.merged) {
+                preparedParts.push({ ...prepared, part: { ...prepared.part, leafId: `${prepared.part.leafId}::visible-base`, paintLayer: 'base', color: shadeColorForLayer(source.color, 'base', settings) } });
+                rasterResults.push(result.merged);
+            }
+        }
+    }
+    const visibleRegionsMs = performance.now() - visibleStart;
 
     let buildSharedChainsMs = 0;
     let extractLoopsMs = 0;
     let simplifyLoopsMs = 0;
     let finalizeShapeMs = 0;
     const buildStart = performance.now();
+    lastProbe = [];
     const shapes = preparedParts
         .map((preparedPart, index) => {
             const rasterData = rasterResults[index] ?? null;
@@ -280,6 +354,7 @@ export const shapeProjectedParts = async (
                 settings,
                 rasterData,
             );
+            if(settings.debugRaster)lastProbe.push({part:preparedPart.part,raster:rasterData,shape:result.shape});
             buildSharedChainsMs += result.timings.buildSharedChains;
             extractLoopsMs += result.timings.extractLoops;
             simplifyLoopsMs += result.timings.simplifyLoops;
@@ -306,6 +381,7 @@ export const shapeProjectedParts = async (
         values: {
             prepareParts: prepareMs,
             rasterizeBatch: rasterMs,
+            visibleRegions: visibleRegionsMs,
             buildSharedChains: buildSharedChainsMs,
             extractLoops: extractLoopsMs,
             simplifyLoops: simplifyLoopsMs,

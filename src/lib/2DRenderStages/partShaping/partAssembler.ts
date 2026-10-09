@@ -23,6 +23,8 @@ export const buildProjectedPartShapeFromRasterData = (
 ) => {
     const modeDefaults = getStyleModeDefaults(settings.styleMode);
     const simplifyMultiplier = settings.enableComposition ? part.simplifyMultiplier ?? 1 : 1;
+    const preserveRasterContour = settings.simplifyEpsilon * simplifyMultiplier <= 0
+        && settings.preserveRasterContours !== false;
     const sharedChainsStart = performance.now();
     const projectedSharedChains = buildProjectedSharedChainsForPart(
         part,
@@ -61,7 +63,10 @@ export const buildProjectedPartShapeFromRasterData = (
                 rasterData.offsetY,
             );
 
-            const simplified = simplifyLoopByAnchorIndices(
+            // Shared mesh chains describe full geometry, not its visible or lit
+            // subset. Snapping a zero-simplification contour to them can cut
+            // away occupied pixels as the pose changes (hair strips, irises).
+            const simplified = preserveRasterContour ? loop : simplifyLoopByAnchorIndices(
                 loop,
                 anchorIndices,
                 settings.simplifyEpsilon * simplifyMultiplier,
@@ -88,7 +93,7 @@ export const buildProjectedPartShapeFromRasterData = (
         .filter(
             (loop) =>
                 loop.length >= 3 &&
-                Math.abs(polygonArea(loop)) > (part.focusLevel === 'focal' ? 0.12 : 6),
+                Math.abs(polygonArea(loop)) > (part.preserveSmallPaintRegions ? 0 : part.focusLevel === 'focal' ? 0.12 : 6),
         );
     const simplifyLoopsMs = performance.now() - simplifyLoopsStart;
 
@@ -159,6 +164,7 @@ export const buildProjectedPartShapeFromRasterData = (
     });
     const averagedNormal = new THREE.Vector3(normalX, normalY, normalZ).normalize();
     const shape = {
+        preserveSmallPaintRegions: part.preserveSmallPaintRegions,
         opacity: part.opacity,
         leafId: part.leafId,
         sourceLeafId: part.sourceLeafId ?? part.leafId,

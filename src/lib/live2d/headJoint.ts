@@ -12,8 +12,8 @@ export const buildHeadJointKeyforms = (
     const yaw = bundle.params.find((param) => param.id === 'ParamAngleX');
     const pitch = bundle.params.find((param) => param.id === 'ParamAngleY');
     const faceIndex = drawables.map((drawable, index) => ({ drawable, index }))
-        .filter(({ drawable }) => drawable.vertexCount > 0 && /顔|颜|face/i.test(drawable.label) && !/hair|髪|发/i.test(drawable.label))
-        .sort((a, b) => b.drawable.vertexCount - a.drawable.vertexCount)[0]?.index ?? -1;
+        .filter(({ drawable }) => drawable.vertexCount > 0 && (drawable.facialRole === 'skin' || (!drawable.facialRole && /顔|颜|face/i.test(drawable.label) && !/hair|髪|发/i.test(drawable.label))))
+        .sort((a,b)=>Number(b.drawable.facialRole==='skin')-Number(a.drawable.facialRole==='skin')||b.drawable.vertexCount-a.drawable.vertexCount)[0]?.index ?? -1;
     const corners = bundle.samples.filter((sample) => sample.kind === 'head-corner');
     if (!yaw || !pitch || faceIndex < 0 || corners.length !== 4 ||
         !(yaw.min < yaw.default && yaw.default < yaw.max && pitch.min < pitch.default && pitch.default < pitch.max)) return [];
@@ -53,11 +53,12 @@ export const buildHeadJointKeyforms = (
         dy *= attenuation;
         const block = grid.displacements[yIndex * 3 + xIndex];
         drawables.forEach((drawable, index) => {
-            if (index !== faceIndex && !/髪|发|髮|hair|bang|fringe|颜|顔|睫|目|眼|瞳|眉|口|唇|齿|歯|舌|二重|头饰|頭飾|eye|lash|brow|mouth|lip|teeth|tongue|headdress/i.test(drawable.label)) return;
+            const attachment=drawable.headAttachment??drawable.rollAttachment;
+            if (index !== faceIndex && !drawable.facialRole && !drawable.maskOnly && !attachment && !/髪|发|髮|hair|bang|fringe|颜|顔|睫|目|眼|瞳|眉|口|唇|齿|歯|舌|二重|头饰|頭飾|eye|lash|brow|mouth|lip|teeth|tongue|headdress/i.test(drawable.label)) return;
             const positions = neutralPositions[index];
             for (let i = 0; i < positions.length; i += 2) {
                 // Head and roots share one correction; long tips fade out.
-                const weight = 1 - Math.max(0, Math.min(1, (positions[i + 1] - maxY) / Math.max(1, maxY - minY)));
+                const weight = attachment ? attachment[i/2] : 1 - Math.max(0, Math.min(1, (positions[i + 1] - maxY) / Math.max(1, maxY - minY)));
                 block[offsets[index] + i] = dx * weight;
                 block[offsets[index] + i + 1] = dy * weight;
             }

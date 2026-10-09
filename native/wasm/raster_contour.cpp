@@ -58,6 +58,9 @@ struct PartResult {
 };
 
 std::string g_last_error;
+float g_depth_tolerance = 0.0005f;
+const float* g_part_opacities = nullptr;
+int32_t g_opacity_count = 0;
 
 std::int64_t vertex_key(int x, int y) {
     return (static_cast<std::int64_t>(x) << 32) ^ static_cast<std::uint32_t>(y);
@@ -350,7 +353,7 @@ RASTER_CONTOUR_EXPORT int32_t rasterize_contour_batch(
                             const std::size_t local_index = static_cast<std::size_t>(local_y) * bounds.width + local_x;
                             results[part].depth[local_index] = std::min(results[part].depth[local_index], depth);
                         }
-                        if (depth < global_depth[pixel]) {
+                        if ((!g_part_opacities || part >= g_opacity_count || g_part_opacities[part] >= 0.9999f) && depth < global_depth[pixel]) {
                             global_depth[pixel] = depth;
                         }
                     }
@@ -374,7 +377,7 @@ RASTER_CONTOUR_EXPORT int32_t rasterize_contour_batch(
                     const float raw_depth = result.depth[local_index];
                     if (!std::isfinite(raw_depth)) continue;
                     result.nearest_depth = std::min(result.nearest_depth, raw_depth);
-                    if (raw_depth <= global_depth[global_index] + 0.0005f) {
+                    if (raw_depth <= global_depth[global_index] + g_depth_tolerance) {
                         result.mask[local_index] = 1;
                     }
                 }
@@ -462,6 +465,12 @@ RASTER_CONTOUR_EXPORT int32_t rasterize_contour_batch(
 
 RASTER_CONTOUR_EXPORT const char* raster_contour_last_error() {
     return g_last_error.c_str();
+}
+
+RASTER_CONTOUR_EXPORT void raster_contour_set_visibility(float tolerance, const float* opacities, int32_t count) {
+    g_depth_tolerance = std::isfinite(tolerance) ? std::max(0.0f, tolerance) : 0.0005f;
+    g_part_opacities = opacities;
+    g_opacity_count = count;
 }
 
 } // extern "C"

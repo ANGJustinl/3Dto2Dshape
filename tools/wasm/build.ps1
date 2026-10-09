@@ -41,7 +41,7 @@ if (-not (Get-Command $Emcc -ErrorAction SilentlyContinue) -and -not (Test-Path 
 New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
 & $Emcc $source -std=c++17 -O3 -msimd128 `
     -sMODULARIZE=1 -sEXPORT_ES6=1 -sENVIRONMENT=web -sALLOW_MEMORY_GROWTH=1 `
-    -sEXPORTED_FUNCTIONS="['_malloc','_free','_rasterize_contour_batch','_raster_contour_last_error']" `
+    -sEXPORTED_FUNCTIONS="['_malloc','_free','_rasterize_contour_batch','_raster_contour_last_error','_raster_contour_set_visibility']" `
     -sEXPORTED_RUNTIME_METHODS="['UTF8ToString','HEAPF32','HEAP32','HEAPU8']" `
     -o $output
 if ($LASTEXITCODE -ne 0) { throw "Emscripten build failed with exit code $LASTEXITCODE." }

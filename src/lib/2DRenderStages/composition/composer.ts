@@ -1,7 +1,7 @@
 import type { GpuDepthAtlasState } from '../partRasterization/rasterizer';
 import type { ProjectedPartShape, ProjectionOverlaySettings } from '../../2DRenderShared/types';
 import { recordPerfSample } from '../../perfLogger';
-import { shapeAlpha } from '../../2DRenderShared/opacity';
+import { paintFillAlphaScale, shapeAlpha } from '../../2DRenderShared/opacity';
 import { getSharedWebGpuContext } from '../../webgpuShared';
 
 type GPUCanvasContextLike = any;
@@ -10,6 +10,12 @@ type GPURenderPipelineLike = any;
 type GPUBufferLike = any;
 type GPUTextureLike = any;
 type GPUBindGroupLike = any;
+
+export type ComposeOptions = {
+    transparent?: boolean;
+    /** Backing-store scale; defaults to window.devicePixelRatio. */
+    pixelRatio?: number;
+};
 
 type ShapeBounds = {
     offsetX: number;
@@ -73,6 +79,7 @@ const getShapeBounds = (
     shape: ProjectedPartShape,
     viewportWidth: number,
     viewportHeight: number,
+    fillBleed: number,
 ): ShapeBounds | null => {
     let minX = Number.POSITIVE_INFINITY;
     let minY = Number.POSITIVE_INFINITY;
@@ -92,7 +99,7 @@ const getShapeBounds = (
         return null;
     }
 
-    const padding = 2;
+    const padding = 2 + Math.ceil(fillBleed);
     const offsetX = Math.max(0, Math.floor(minX) - padding);
     const offsetY = Math.max(0, Math.floor(minY) - padding);
     const endX = Math.min(viewportWidth, Math.ceil(maxX) + padding);
@@ -131,13 +138,16 @@ const flattenLoops = (shape: ProjectedPartShape) => {
     };
 };
 
+const getFillBleed = (settings: ProjectionOverlaySettings) =>
+    Math.max(0, Math.min(4, settings.fillBleed ?? 0));
+
 const buildPreparedShape = (
     shape: ProjectedPartShape,
     viewportWidth: number,
     viewportHeight: number,
     settings: ProjectionOverlaySettings,
 ): PreparedShape | null => {
-    const bounds = getShapeBounds(shape, viewportWidth, viewportHeight);
+    const bounds = getShapeBounds(shape, viewportWidth, viewportHeight, getFillBleed(settings));
     if (!bounds) {
         return null;
     }
@@ -179,7 +189,7 @@ export class GpuOverlayComposer {
         viewportHeight: number,
         settings: ProjectionOverlaySettings,
         depthAtlas: GpuDepthAtlasState | null,
-        options?: { transparent?: boolean },
+        options?: ComposeOptions,
     ) {
         const totalStart = performance.now();
         if (viewportWidth <= 0 || viewportHeight <= 0) {
@@ -192,7 +202,7 @@ export class GpuOverlayComposer {
             .filter((shape): shape is PreparedShape => shape !== null);
         const prepareMs = performance.now() - prepareStart;
         if (preparedShapes.length === 0 || !depthAtlas) {
-            await this.clear(canvas, viewportWidth, viewportHeight, settings, options?.transparent);
+            await this.clear(canvas, viewportWidth, viewportHeight, settings, options?.transparent, options?.pixelRatio);
             return false;
         }
 
@@ -204,7 +214,7 @@ export class GpuOverlayComposer {
         const renderId = this.latestRenderId + 1;
         this.latestRenderId = renderId;
 
-        this.configureCanvas(canvas, device, viewportWidth, viewportHeight);
+        this.configureCanvas(canvas, device, viewportWidth, viewportHeight, options?.pixelRatio);
         this.ensureDepthTexture(device, canvas.width, canvas.height);
         this.ensurePipelines(device);
         const background = hexToRgba(settings.backgroundColor, options?.transparent ? 0 : 1);
@@ -230,9 +240,9 @@ export class GpuOverlayComposer {
                 {
                     view: currentTexture.createView(),
                     clearValue: {
-                        r: background[0],
-                        g: background[1],
-                        b: background[2],
+                        r: background[0] * background[3],
+                        g: background[1] * background[3],
+                        b: background[2] * background[3],
                         a: background[3],
                     },
                     loadOp: 'clear',
@@ -294,6 +304,7 @@ export class GpuOverlayComposer {
         viewportHeight: number,
         settings?: ProjectionOverlaySettings,
         transparent?: boolean,
+        pixelRatio?: number,
     ) {
         if (viewportWidth <= 0 || viewportHeight <= 0) {
             return;
@@ -311,7 +322,7 @@ export class GpuOverlayComposer {
             return;
         }
 
-        this.configureCanvas(canvas, device, viewportWidth, viewportHeight);
+        this.configureCanvas(canvas, device, viewportWidth, viewportHeight, pixelRatio);
         const currentTexture = this.context!.getCurrentTexture();
         const commandEncoder = device.createCommandEncoder();
         const renderPass = commandEncoder.beginRenderPass({
@@ -319,9 +330,9 @@ export class GpuOverlayComposer {
                 {
                     view: currentTexture.createView(),
                     clearValue: {
-                        r: background[0],
-                        g: background[1],
-                        b: background[2],
+                        r: background[0] * background[3],
+                        g: background[1] * background[3],
+                        b: background[2] * background[3],
                         a: background[3],
                     },
                     loadOp: 'clear',
@@ -343,8 +354,11 @@ export class GpuOverlayComposer {
         device: GPUDeviceLike,
         viewportWidth: number,
         viewportHeight: number,
+        pixelRatioOverride?: number,
     ) {
-        const pixelRatio = window.devicePixelRatio || 1;
+        // Shapes, strokes and depth lookups stay in viewport units; only the
+        // backing store scales, so an override renders the same look larger.
+        const pixelRatio = pixelRatioOverride ?? (window.devicePixelRatio || 1);
         const width = Math.max(1, Math.round(viewportWidth * pixelRatio));
         const height = Math.max(1, Math.round(viewportHeight * pixelRatio));
 
@@ -468,8 +482,7 @@ fn pointToSegmentDistance(point: vec2<f32>, start: vec2<f32>, end: vec2<f32>) ->
     return distance(point, projected);
 }
 
-fn isBoundary(screenPosition: vec2<f32>) -> bool {
-    let strokeRadius = max(0.5, uniforms.viewportStroke.z);
+fn boundaryDistance(screenPosition: vec2<f32>) -> f32 {
     var minimumDistance = 1e20;
     let loopCount = arrayLength(&loopRanges);
     for (var loopIndex = 0u; loopIndex < loopCount; loopIndex += 1u) {
@@ -487,7 +500,11 @@ fn isBoundary(screenPosition: vec2<f32>) -> bool {
         }
     }
 
-    return minimumDistance <= strokeRadius;
+    return minimumDistance;
+}
+
+fn isBoundary(screenPosition: vec2<f32>) -> bool {
+    return boundaryDistance(screenPosition) <= max(0.5, uniforms.viewportStroke.z);
 }
 
 fn stableEdgeNoise(screenPosition: vec2<f32>) -> f32 {
@@ -595,22 +612,23 @@ fn vertexMain(input: VertexInput) -> VertexOutput {
 
 @fragment
 fn fragmentMain(input: VertexOutput) -> FragmentOutput {
-    if (!isInsideShape(input.screenPosition)) {
+    // depthSettings.z is the fill bleed: pixels just outside the contour are
+    // filled too, closing cracks between independently simplified neighbours.
+    let inside = isInsideShape(input.screenPosition);
+    if (!inside && (uniforms.depthSettings.z <= 0.0 || boundaryDistance(input.screenPosition) > uniforms.depthSettings.z)) {
         discard;
     }
 
     let depthNdc = sampleDepthNdc(input.screenPosition);
     var output: FragmentOutput;
-    let onBoundary = uniforms.viewportStroke.w > 0.5 && isBoundary(input.screenPosition);
+    let onBoundary = inside && uniforms.viewportStroke.w > 0.5 && isBoundary(input.screenPosition);
     if (onBoundary && uniforms.edgeSettings.x > 1.5 && stableEdgeNoise(input.screenPosition) < uniforms.edgeSettings.z) {
         discard;
     }
     var edgeColor = uniforms.edgeColor;
     edgeColor.a *= uniforms.edgeSettings.y;
     output.color = select(uniforms.color, edgeColor, onBoundary);
-    if (uniforms.edgeSettings.x > 0.5 && uniforms.edgeSettings.x < 1.5) {
-        output.color.a *= 0.92;
-    }
+    output.color.a *= uniforms.depthSettings.w;
     output.depth = clamp(depthNdc * 0.5 + 0.5, 0.0, 1.0);
     return output;
 }
@@ -773,8 +791,8 @@ fn fragmentMain(input: VertexOutput) -> FragmentOutput {
                  ...(shape.previewFlatInk ? [0, 0, 0, 1] : hexToRgba(settings.outlineColor, shapeAlpha(shape.opacity, settings.outlineOpacity))),
                 shape.depthSource === 'constant' ? 1 : 0,
                 shape.depth,
-                0,
-                0,
+                getFillBleed(settings),
+                paintFillAlphaScale(shape.edgeProfile.mode, shape.color[3], settings.flickerControl?.stableOpaqueFill),
                 edgeModeCode,
                 shape.edgeProfile.hardness,
                 shape.edgeProfile.openness,

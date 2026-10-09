@@ -57,6 +57,23 @@ type PreparedRequest = RasterizeRequest & {
 
 const WORKGROUP_SIZE = 8;
 const ATLAS_PADDING = 1;
+const MIN_ATLAS_WIDTH = 2048;
+
+/**
+ * Shelf width for the part atlas. Stays at 2048 for ordinary views; grows
+ * toward a square only when the parts would otherwise stack taller than the
+ * device allows (close-ups where single parts span most of the screen).
+ */
+export const chooseAtlasWidth = (sizes: Array<{ width: number; height: number }>, maxDimension: number) => {
+    let area = 0;
+    let widest = 1;
+    sizes.forEach(({ width, height }) => {
+        area += (width + ATLAS_PADDING) * (height + ATLAS_PADDING);
+        widest = Math.max(widest, width);
+    });
+    const square = Math.ceil(Math.sqrt(area * 1.25));
+    return Math.min(maxDimension, Math.max(MIN_ATLAS_WIDTH, widest, square));
+};
 const MASK_FORMAT = 'rgba8unorm';
 const DEPTH_FORMAT = 'r32float';
 
@@ -132,7 +149,7 @@ class GpuPartRasterizer {
 
         this.ensurePipelines(device);
         const prepareStart = performance.now();
-        const preparedRequests = this.prepareRequests(requests);
+        const preparedRequests = this.prepareRequests(requests, device.limits.maxTextureDimension2D);
         const prepareMs = performance.now() - prepareStart;
         if (preparedRequests.length === 0) {
             return new Array<GpuRasterizedPartData | null>(requests.length).fill(null);
@@ -560,15 +577,19 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
         this.atlasHeight = atlasHeight;
     }
 
-    private prepareRequests(requests: RasterizeRequest[]) {
-        const atlasMaxWidth = 2048;
+    private prepareRequests(requests: RasterizeRequest[], maxDimension: number) {
         const preparedRequests: PreparedRequest[] = [];
+        const boundsByRequest = requests.map((request) => computePartBounds(request.part, request.projectionCache));
+        const atlasMaxWidth = chooseAtlasWidth(
+            boundsByRequest.filter((bounds): bounds is NonNullable<typeof bounds> => bounds !== null),
+            maxDimension,
+        );
         let cursorX = 0;
         let cursorY = 0;
         let rowHeight = 0;
 
         requests.forEach((request, sourceIndex) => {
-            const bounds = computePartBounds(request.part, request.projectionCache);
+            const bounds = boundsByRequest[sourceIndex];
             if (!bounds) {
                 return;
             }
@@ -707,12 +728,12 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
             return null;
         }
 
-        const atlasMaxWidth = 2048;
         const atlasPadding = ATLAS_PADDING;
         let cursorX = 0;
         let cursorY = 0;
         let rowHeight = 0;
         const validResults = rasterResults.filter((result): result is RasterizedPartData => result !== null);
+        const atlasMaxWidth = chooseAtlasWidth(validResults, device.limits.maxTextureDimension2D);
 
         validResults.forEach((result) => {
             if (cursorX > 0 && cursorX + result.width > atlasMaxWidth) {

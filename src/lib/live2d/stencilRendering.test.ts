@@ -3,6 +3,17 @@ import * as THREE from 'three';
 import { renderMaskedMeshes } from './stencilRendering';
 
 describe('stencil preview rendering', () => {
+    it('uses geometric masks at full coverage even when their display opacity is zero', () => {
+        const masker = new THREE.Mesh(new THREE.BufferGeometry(), new THREE.MeshBasicMaterial({ opacity: 0 }));
+        masker.userData.maskOnly = true;
+        const target = new THREE.Mesh(new THREE.BufferGeometry(), new THREE.MeshBasicMaterial());
+        const write = masker.material.clone();
+        const renderer = {autoClear:true, clear:vi.fn(), clearStencil:vi.fn(),render:vi.fn((mesh:THREE.Object3D)=>{
+            if(mesh===masker)expect(((mesh as THREE.Mesh).material as THREE.MeshBasicMaterial).opacity).toBe(1);
+        })};
+        renderMaskedMeshes(renderer,new THREE.Camera(),[target],[{maskerMesh:masker,maskedMeshes:[target],stencilWriteMaterial:write}]);
+        expect(masker.material.opacity).toBe(0);
+    });
     it('preserves scene children, order, textures and color across repeated frames', () => {
         const scene = new THREE.Scene();
         const meshes = Array.from({ length: 3 }, () => new THREE.Mesh(

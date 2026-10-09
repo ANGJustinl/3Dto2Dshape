@@ -2,10 +2,12 @@ import * as THREE from 'three';
 import type { MeshProjectionCache } from '../../2DRenderShared/types';
 import type { ProjectionPartSource } from '../../modelParts';
 import { getSharedWebGpuContext } from '../../webgpuShared';
+import { toAnimatedWorldNormals } from './authoredNormals';
 
 type MeshLike = THREE.Mesh | THREE.SkinnedMesh;
 
 type MeshSnapshot = {
+    worldNormals?: Float32Array;
     mesh: MeshLike;
     positions: Float32Array;
     matrixWorld: Float32Array;
@@ -15,6 +17,7 @@ type MeshSnapshot = {
 
 type GpuRequest = {
     frameId: number;
+    sampleTime: number;
     viewportWidth: number;
     viewportHeight: number;
     viewProjectionMatrix: Float32Array;
@@ -39,6 +42,7 @@ type MeshGpuResources = {
 
 export type ProjectionFrameResult = {
     frameId: number;
+    sampleTime?: number;
     width: number;
     height: number;
     getProjectionCache: (mesh: MeshLike) => MeshProjectionCache | null;
@@ -115,6 +119,40 @@ class WebGpuProjectionPipeline {
     private waitersByFrame = new Map<number, Array<(ready: boolean) => void>>();
     private pendingRequest: GpuRequest | null = null;
     private inFlight = false;
+    private lastAllocatedFrameId = 0;
+    private releasedMeshes = new WeakSet<MeshLike>();
+    private retiredResources = new Set<MeshGpuResources>();
+
+    allocateFrameId() {
+        return ++this.lastAllocatedFrameId;
+    }
+
+    releaseMeshes(meshes: MeshLike[]) {
+        for (const mesh of meshes) {
+            this.releasedMeshes.add(mesh);
+            const resource = this.resourcesByMesh.get(mesh);
+            if (resource) this.retiredResources.add(resource);
+            this.resourcesByMesh.delete(mesh);
+        }
+        if (this.pendingRequest) {
+            this.pendingRequest.meshSnapshots = this.pendingRequest.meshSnapshots.filter((snapshot) => !this.releasedMeshes.has(snapshot.mesh));
+            if (!this.pendingRequest.meshSnapshots.length) {
+                this.resolveFrameWaiters(this.pendingRequest.frameId, false);
+                this.pendingRequest = null;
+            }
+        }
+        if (!this.inFlight) this.destroyRetiredResources();
+    }
+
+    private destroyRetiredResources() {
+        for (const resource of this.retiredResources) {
+            resource.positionsBuffer.destroy();
+            resource.uniformsBuffer.destroy();
+            resource.projectedOutputBuffer.destroy();
+            resource.projectedReadbackBuffer.destroy();
+        }
+        this.retiredResources.clear();
+    }
 
     isSupported() {
         return typeof navigator !== 'undefined' && 'gpu' in navigator;
@@ -126,6 +164,8 @@ class WebGpuProjectionPipeline {
         viewportWidth: number,
         viewportHeight: number,
         frameId: number,
+        sampleTime = performance.now() / 1000,
+        includeAuthoredNormals = false,
     ) {
         if (!this.isSupported() || viewportWidth <= 0 || viewportHeight <= 0 || parts.length === 0) {
             return;
@@ -167,6 +207,7 @@ class WebGpuProjectionPipeline {
                 }
 
                 meshSnapshots.push({
+                    worldNormals: includeAuthoredNormals ? toAnimatedWorldNormals(mesh) : undefined,
                     mesh,
                     positions: toAnimatedLocalPositions(mesh),
                     matrixWorld: new Float32Array(flattenMatrix4(mesh.matrixWorld)),
@@ -185,6 +226,7 @@ class WebGpuProjectionPipeline {
 
         this.pendingRequest = {
             frameId,
+            sampleTime,
             viewportWidth,
             viewportHeight,
             viewProjectionMatrix: new Float32Array(flattenMatrix4(viewProjectionMatrix)),
@@ -229,6 +271,7 @@ class WebGpuProjectionPipeline {
             }
         }
         this.inFlight = false;
+        this.destroyRetiredResources();
     }
 
     private async getDevice() {
@@ -306,6 +349,7 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
         const meshResources: Array<{ mesh: MeshLike; resource: MeshGpuResources; snapshot: MeshSnapshot }> = [];
 
         request.meshSnapshots.forEach((snapshot) => {
+            if (this.releasedMeshes.has(snapshot.mesh)) return;
             const resource = this.ensureResources(device, snapshot);
             if (!resource) {
                 return;
@@ -371,6 +415,7 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
 
         const result: ProjectionFrameResult = {
             frameId: request.frameId,
+            sampleTime: request.sampleTime,
             width: request.viewportWidth,
             height: request.viewportHeight,
             getProjectionCache: (mesh) => cachesByMesh.get(mesh) ?? null,
@@ -520,6 +565,7 @@ fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
         }
 
         return {
+            worldNormals: snapshot.worldNormals,
             width: viewportWidth,
             height: viewportHeight,
             screenX,

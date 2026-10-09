@@ -3,6 +3,7 @@ import * as THREE from 'three';
 import type { ProjectionMaskState, ProjectionOverlaySettings } from '../lib/2DRenderShared/types';
 import { OverlayRenderPipeline } from '../lib/2DRenderPipeline/overlayPipeline';
 import type { ProjectionPartSource } from '../lib/modelParts';
+import { projectionRasterScale, scaleProjectionPixelSettings } from '../lib/2DRenderPipeline/temporalPaint';
 
 export type ProjectionOverlayHandle = {
     renderFrame: (
@@ -40,14 +41,15 @@ const ProjectionOverlay = forwardRef<ProjectionOverlayHandle>(function Projectio
             visibleLeafIds,
             frameId,
         ) => {
+            const rasterScale = projectionRasterScale(settings);
             void overlayPipelineRef.current.enqueue(
                 canvasRef.current,
                 root,
-                viewportWidth,
-                viewportHeight,
+                viewportWidth * rasterScale,
+                viewportHeight * rasterScale,
                 parts,
                 maskState,
-                settings,
+                scaleProjectionPixelSettings(settings, rasterScale),
                 visibleLeafIds,
                 frameId,
             );

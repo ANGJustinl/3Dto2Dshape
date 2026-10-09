@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
 import type { MaterialDebugInfo, PartNode } from '../lib/modelParts';
 import type { FocusLevel, ProjectionOverlaySettings, WasmRasterSnapshot } from '../lib/2DRenderShared/types';
 import { getRasterContourClient } from '../lib/wasm/rasterContourClient';
@@ -8,8 +9,11 @@ import Live2DPreviewPanel from './Live2DPreviewPanel';
 import type { ExportVideoSettings } from '../lib/export/videoExporter';
 import type { BakeSummary } from '../lib/live2d/bakeSummary';
 import type { Live2dModel } from '../lib/live2d/model';
+import { FLICKER_PRESETS } from '../lib/2DRenderPipeline/temporalPaint';
 
 type PartPanelProps = {
+  assetPanel?: ReactNode;
+  operationBusy?: boolean;
   parts: PartNode[];
   debugMaterials: MaterialDebugInfo[];
   selectedPartId: string | null;
@@ -126,6 +130,8 @@ const collectParentPaths = (parts: PartNode[]) => {
 };
 
 function PartPanel({
+  assetPanel,
+  operationBusy = false,
   parts,
   debugMaterials,
   selectedPartId,
@@ -232,6 +238,7 @@ function PartPanel({
 
   return (
     <aside className="part-panel">
+      {assetPanel}
       <ExportPanel
         animationFrameCount={animationFrameCount}
         onExportVideo={onExportVideo}
@@ -240,7 +247,7 @@ function PartPanel({
       {live2dModel ? (
         <Live2DPreviewPanel model={live2dModel} onImportModel={onImportLive2dModel} />
       ) : null}
-      <div className="projection-controls">
+      <div className="projection-controls" inert={operationBusy || undefined}>
         <label className="projection-select">
           <span>Style Mode</span>
           <select
@@ -541,6 +548,28 @@ function PartPanel({
               })
             }
           />
+        </label>
+        <label className="projection-select">
+          <span>抗闪烁实验</span>
+          <select
+            value={Object.entries(FLICKER_PRESETS).find(([, value]) => JSON.stringify(value) === JSON.stringify(projectionSettings.flickerControl))?.[0] ?? 'baseline'}
+            onChange={event => onProjectionSettingsChange({
+              ...projectionSettings,
+              flickerControl: { ...FLICKER_PRESETS[event.currentTarget.value as keyof typeof FLICKER_PRESETS] },
+            })}
+          >
+            <option value="baseline">原有渲染</option>
+            <option value="shade">减少明暗反复切换</option>
+            <option value="regions">明暗稳定＋合并零散阴影</option>
+            <option value="normals">局部法线平滑（实验）</option>
+            <option value="combined">组合方案</option>
+            <option value="sampling">细节采样 ×2（较慢）</option>
+            <option value="visible">合并遮挡后的碎阴影</option>
+            <option value="visibleStrong">合并更多碎阴影</option>
+            <option value="fast">明暗稳定＋减少重复计算</option>
+            <option value="visibleFast">碎阴影合并＋减少重复计算</option>
+            <option value="opaque">修正色块透明度＋明暗稳定</option>
+          </select>
         </label>
         <label className="projection-select">
           <span>Composition</span>

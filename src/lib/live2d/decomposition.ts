@@ -1,5 +1,6 @@
 import type { BakeBundle, BakeSample } from './types';
 import { splitHairLayers } from './hairLayers';
+import { splitFacialSurfaces } from './facialSurfaces';
 
 /**
  * M1: pose-invariant drawable decomposition.
@@ -12,6 +13,22 @@ import { splitHairLayers } from './hairLayers';
  */
 
 export type DrawableDecomposition = {
+    facialRole?: 'skin' | 'feature';
+    surfaceTexture?: boolean;
+    maskOnly?: boolean;
+    textureRevealRegions?: Array<{x0:number;y0:number;x1:number;y1:number}>;
+    textureCutoutRegions?: Array<{x0:number;y0:number;x1:number;y1:number}>;
+    textureRevealLeafIds?: string[];
+    headAttachment?: Float32Array;
+    rollAttachment?: Float32Array;
+    surfaceSourceId?: string;
+    blinkSupport?: boolean;
+    textureRevealTriangleKeys?: Set<string>;
+    foregroundOnly?: boolean;
+    /** Whole head-bound paint layer can render after facial patches once. */
+    facialForeground?: boolean;
+    textureCoverage?: Uint8Array;
+    deformationSourceId?: string;
     id: string;
     label: string;
     meshId: string;
@@ -87,7 +104,7 @@ export const decomposeDrawables = (bundle: BakeBundle): DrawableDecomposition[] 
             void key;
         });
 
-    return drawables.flatMap(splitHairLayers);
+    return splitFacialSurfaces(bundle, drawables.flatMap(splitHairLayers));
 };
 
 /** Neutral-sample screen positions for a drawable, compacted to its vertex table. */
