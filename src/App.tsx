@@ -410,6 +410,25 @@ function App({
         const scene = new THREE.Scene();
         scene.background = new THREE.Color(0x87ceeb);
 
+        // [UV materials] MMDToonMaterial declares lights:true and its toon/matcap
+        // shading is computed from scene lights. The earlier "clone MMDToonMaterial
+        // -> black silhouette" attempts never added any light to this scene.
+        // Add lights for the UV texture path so the real MMD material (matcap /
+        // toon gradient / additive blend) survives into the baked atlas. The
+        // flat-paint path uses MeshBasicMaterial, which ignores lights, so it
+        // stays byte-identical.
+        if ((window as any).__uvTexturePick === true) {
+            const ambient = new THREE.AmbientLight(0xffffff, 2.0);
+            scene.add(ambient);
+            const key = new THREE.DirectionalLight(0xffffff, 1.4);
+            key.position.set(-8, 16, 24);
+            scene.add(key);
+            const fill = new THREE.DirectionalLight(0xffffff, 0.6);
+            fill.position.set(12, 6, 10);
+            scene.add(fill);
+            console.log('[UV_LIT] scene lights added');
+        }
+
         const camera = new THREE.PerspectiveCamera(
             35,
             mount.clientWidth / mount.clientHeight,
@@ -1170,36 +1189,113 @@ function App({
                 leafIds: string[],
                 isoCamera: THREE.PerspectiveCamera,
                 viewport: { width: number; height: number },
+                _drawable?: unknown,
+                tile?: { x: number; y: number; width: number; height: number },
             ): IsolatedRenderResult => {
                 const leafIdSet = new Set(leafIds);
-                const renderTarget = new THREE.WebGLRenderTarget(viewport.width, viewport.height, {
+                // [MSAA] MSAA for the UV texture path only. The on-screen
+                // renderer has antialias:true, but this offscreen target did not:
+                // every silhouette was a hard alpha step and looked jagged after
+                // the desktop pet scaled it up. samples:4 resolves on readback.
+                const uvPick = (window as any).__uvTexturePick === true;
+                // [occlusion mask] Reproduce the flat-paint visibility mask inside
+                // the same small tile RT: erase pixels where this drawable sits
+                // BEHIND a nearer part (e.g. a headscarf drawn over the face). No
+                // second full-screen renderer, no bypass of the bbox tile. Off for
+                // the flat-paint path and any non-tile render.
+                const useOcclusion = uvPick && !!tile && (window as any).__uvOcclusionMask !== false;
+                // [bbox tile] The old code rendered EVERY part into a full
+                // viewport-sized RT (4096x4096 at HD) then cropped away ~99% of
+                // it. That is what exhausted the 8GB card. When a tile rect is
+                // supplied, render just that rect into a small RT; setViewOffset
+                // keeps the projection pixel-identical to the full-screen pass.
+                const rtWidth = tile ? Math.max(1, Math.round(tile.width)) : viewport.width;
+                const rtHeight = tile ? Math.max(1, Math.round(tile.height)) : viewport.height;
+                const renderTarget = new THREE.WebGLRenderTarget(rtWidth, rtHeight, {
                     depthBuffer: true,
                     stencilBuffer: false,
+                    samples: uvPick ? 4 : 0,
                 });
+                const savedAspect = isoCamera.aspect;
+                const savedView = isoCamera.view ? { ...isoCamera.view } : null;
+                if (tile) {
+                    isoCamera.setViewOffset(viewport.width, viewport.height, tile.x, tile.y, rtWidth, rtHeight);
+                    isoCamera.aspect = savedAspect; // setViewOffset resets aspect; keep the full-screen projection
+                    isoCamera.updateProjectionMatrix();
+                }
                 const materialVisibility = new Map<THREE.Material, boolean>();
+                const materialColorWrite = new Map<THREE.Material, boolean>();
+                const materialDepthWrite = new Map<THREE.Material, boolean>();
+                const materialDepthFunc = new Map<THREE.Material, THREE.Material['depthFunc']>();
                 leafMaterialMapRef.current.forEach((material, leafId) => {
                     materialVisibility.set(material, material.visible);
+                    materialColorWrite.set(material, material.colorWrite);
+                    materialDepthWrite.set(material, material.depthWrite);
+                    materialDepthFunc.set(material, material.depthFunc);
                     material.visible = leafIdSet.has(leafId);
                 });
                 const previousBackground = scene.background;
                 const previousClearAlpha = renderer.getClearAlpha();
+                const previousAutoClear = renderer.autoClear;
                 scene.background = null;
                 renderer.setRenderTarget(renderTarget);
                 renderer.setClearColor(0x000000, 0);
                 renderer.clear();
-                renderer.render(scene, isoCamera);
-                const rgba = new Uint8Array(viewport.width * viewport.height * 4);
-                renderer.readRenderTargetPixels(renderTarget, 0, 0, viewport.width, viewport.height, rgba);
+                if (useOcclusion) {
+                    // Two passes into the SAME small tile RT. Disable autoClear so
+                    // pass 2 keeps the depth buffer written by pass 1.
+                    renderer.autoClear = false;
+                    // Pass 1: depth prepass over the FULL scene (all leaves visible,
+                    // no color write). depthWrite is forced on even for transparent
+                    // MMD materials, matching the flat path's geometry depth.
+                    leafMaterialMapRef.current.forEach((material) => {
+                        material.visible = true;
+                        material.colorWrite = false;
+                        material.depthWrite = true;
+                        material.depthFunc = THREE.LessEqualDepth;
+                    });
+                    renderer.render(scene, isoCamera);
+                    // Pass 2: only this drawable writes color. LessEqual + no depth
+                    // write means a pixel survives only where this part is at or in
+                    // front of the nearest full-scene surface (i.e. not covered).
+                    leafMaterialMapRef.current.forEach((material, leafId) => {
+                        material.visible = leafIdSet.has(leafId);
+                        material.colorWrite = true;
+                        material.depthWrite = false;
+                        material.depthFunc = THREE.LessEqualDepth;
+                    });
+                    renderer.render(scene, isoCamera);
+                    renderer.autoClear = previousAutoClear;
+                } else {
+                    renderer.render(scene, isoCamera);
+                }
+                const rgba = new Uint8Array(rtWidth * rtHeight * 4);
+                renderer.readRenderTargetPixels(renderTarget, 0, 0, rtWidth, rtHeight, rgba);
                 renderer.setRenderTarget(null);
+                if (tile) {
+                    if (savedView) isoCamera.view = savedView;
+                    else isoCamera.clearViewOffset();
+                    isoCamera.aspect = savedAspect;
+                    isoCamera.updateProjectionMatrix();
+                }
                 scene.background = previousBackground;
                 renderer.setClearAlpha(previousClearAlpha);
                 materialVisibility.forEach((visible, material) => {
                     material.visible = visible;
                 });
+                if (useOcclusion) {
+                    materialColorWrite.forEach((value, material) => { material.colorWrite = value; });
+                    materialDepthWrite.forEach((value, material) => { material.depthWrite = value; });
+                    materialDepthFunc.forEach((value, material) => { material.depthFunc = value; });
+                }
                 renderTarget.dispose();
-                return { rgba, width: viewport.width, height: viewport.height };
+                // [diagnostic] count non-transparent pixels read back
+                if (!(window as any).__isoStats) (window as any).__isoStats = [];
+                let nonZero = 0;
+                for (let i = 3; i < rgba.length; i += 4) if (rgba[i] > 0) nonZero++;
+                (window as any).__isoStats.push({ leaves: leafIds.length, size: `${rtWidth}x${rtHeight}`, nonZero, total: rgba.length / 4, tile: !!tile });
+                return { rgba, width: rtWidth, height: rtHeight };
             };
-
             const previousPaused = playbackPausedRef.current;
             playbackPausedRef.current = true;
             setIsPlaybackPaused(true);

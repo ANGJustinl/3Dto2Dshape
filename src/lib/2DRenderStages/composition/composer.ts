@@ -181,6 +181,8 @@ export class GpuOverlayComposer {
     private depthTextureHeight = 0;
     private pendingDisposables = new Map<number, Array<{ destroy: () => void }>>();
     private latestRenderId = 0;
+    // [device recovery] rebuild GPU resources when the shared device is replaced.
+    private generation = -1;
 
     async render(
         canvas: HTMLCanvasElement,
@@ -345,8 +347,24 @@ export class GpuOverlayComposer {
     }
 
     private async getDevice() {
+        const ctx = getSharedWebGpuContext();
+        const gen = ctx.getGeneration();
+        if (this.generation !== gen) {
+            this.generation = gen;
+            this.devicePromise = null;
+            this.fillPipeline = null;
+            this.bindGroupLayout = null;
+            this.depthTexture = null;
+            this.depthTextureWidth = 0;
+            this.depthTextureHeight = 0;
+            this.format = null; // force context.configure() on the new device
+            for (const disposables of this.pendingDisposables.values()) {
+                for (const d of disposables) { try { d.destroy(); } catch { /* ignore */ } }
+            }
+            this.pendingDisposables.clear();
+        }
         if (!this.devicePromise) {
-            this.devicePromise = getSharedWebGpuContext().getDevice();
+            this.devicePromise = ctx.getDevice();
         }
         return this.devicePromise;
     }    private configureCanvas(

@@ -1083,6 +1083,12 @@ const buildColorRegions = (triangles: TriangleRecord[]) => {
     return [...activeClusters.values()];
 };
 
+// [UV lighting] The UV path renders with the real 3D materials so the MMD
+// sphere-map / additive highlight / toon layers survive. The flat-paint path
+// still needs the simplified MeshBasicMaterial - that is what makes the clean
+// cel-shaded color blocks. Keep the branch behind the same page flag.
+const uvTexturePickEnabled = () => (globalThis as any).__uvTexturePick === true;
+
 const cloneLeafMaterial = (material: THREE.Material) => {
     const sourceMaterial = material as THREE.Material & {
         map?: THREE.Texture | null;
@@ -1091,6 +1097,36 @@ const cloneLeafMaterial = (material: THREE.Material) => {
         side?: THREE.Side;
         alphaTest?: number;
     };
+
+    // [UV materials] UV path keeps the REAL MMD material so the sphere-map (matcap),
+    // toon gradient and additive blend survive into the baked atlas. The earlier
+    // black-silhouette result (fix② v1/v2) was NOT a clone problem: MMDToonMaterial
+    // declares lights:true and the offscreen scene had zero lights. App.tsx now
+    // adds ambient + directional lights for the UV path, so cloning the real
+    // material restores the layers. Measured on the shouanren PMX: uniqueColors
+    // 723->856, edgeDensity 0.172->0.200, meanGradient 15.8->19.0; Cubism render
+    // complete with no black holes. `__uvFlatUvMaterial=true` forces the old
+    // MeshBasic fallback (diagnostic only).
+    if (uvTexturePickEnabled() && (globalThis as any).__uvFlatUvMaterial !== true) {
+        return material.clone();
+    }
+
+    if (uvTexturePickEnabled()) {
+        // Diagnostic fallback: the previous lossless MeshBasic clone (kept for
+        // A/B comparison; not used by default anymore).
+        return new THREE.MeshBasicMaterial({
+            map: sourceMaterial.map ?? null,
+            alphaMap: sourceMaterial.alphaMap ?? null,
+            color: sourceMaterial.color?.clone() ?? new THREE.Color(0xffffff),
+            side: sourceMaterial.side ?? THREE.FrontSide,
+            transparent: material.transparent,
+            opacity: material.opacity,
+            alphaTest: sourceMaterial.alphaTest ?? 0,
+            blending: material.blending,
+            depthWrite: material.depthWrite,
+            depthTest: material.depthTest,
+        });
+    }
 
     return new THREE.MeshBasicMaterial({
         map: sourceMaterial.map ?? null,
@@ -1112,7 +1148,32 @@ const buildMeshSegmentation = (
     const indexedGeometry = ensureIndexedGeometry(mesh.geometry);
     const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
     const groups = getGeometryGroups(indexedGeometry, materials.length);
-    const redundantOverlays = findRedundantMaterialOverlayGroups(indexedGeometry, materials, groups);
+    // [UV lighting] Flat paint omits duplicate additive sphere-map passes because
+    // it cannot reproduce them and they become opaque z-fighting color blocks.
+    // The UV path renders the real 3D materials, so those passes ARE the missing
+    // highlights - keep them.
+    // Diagnostic: even in UV mode, count what flat paint WOULD have dropped so
+    // the log proves the keep-branch actually had something to restore.
+    const uvFixProbe = (globalThis as any).__uvFixProbe ?? { kept: 0, skipped: 0, meshes: 0 };
+    if (uvTexturePickEnabled()) {
+        uvFixProbe.kept += findRedundantMaterialOverlayGroups(indexedGeometry, materials, groups).size;
+    } else {
+        uvFixProbe.skipped += findRedundantMaterialOverlayGroups(indexedGeometry, materials, groups).size;
+    }
+    uvFixProbe.meshes += 1;
+    // Count MMD shading fields the MeshBasicMaterial clone silently drops:
+    // matcap (sphere map) is the most likely cause of "missing highlights".
+    materials.forEach((m) => {
+        const src = m as THREE.Material & { matcap?: THREE.Texture | null; gradientMap?: THREE.Texture | null };
+        if (src.matcap != null) uvFixProbe.matcap = (uvFixProbe.matcap ?? 0) + 1;
+        if (src.gradientMap != null) uvFixProbe.gradientMap = (uvFixProbe.gradientMap ?? 0) + 1;
+        if (m.blending !== THREE.NormalBlending) uvFixProbe.nonNormalBlend = (uvFixProbe.nonNormalBlend ?? 0) + 1;
+    });
+    (globalThis as any).__uvFixProbe = uvFixProbe;
+
+    const redundantOverlays = uvTexturePickEnabled()
+        ? new Set<number>()
+        : findRedundantMaterialOverlayGroups(indexedGeometry, materials, groups);
     mesh.userData.flatPaintOmittedOverlays = [...redundantOverlays].map((groupIndex) => ({
         materialName: materials[groups[groupIndex].materialIndex].name,
         triangleCount: groups[groupIndex].count / 3,

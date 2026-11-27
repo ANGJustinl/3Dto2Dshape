@@ -77,6 +77,7 @@ export type BuildOptions = {
         camera: THREE.PerspectiveCamera,
         viewport: { width: number; height: number },
         drawable?: DrawableDecomposition,
+        tile?: { x: number; y: number; width: number; height: number },
     ) => IsolatedRenderResult;
     /** Refresh mutable scene/depth caches before each texture pass. */
     onTexturePassStart?: () => void;
@@ -108,6 +109,24 @@ const cropTopDown = (
     }
 
     return { texture: { width, height, rgba }, cropX: cropX1, cropY: cropY1 };
+};
+
+// [bbox tile] When a part is rendered into a small tile RT, readback is
+// already cropped to that tile. Flip the GL bottom-up rows to top-down and
+// keep the tile origin as the crop offset so UV remapping stays identical to
+// the full-screen-render-then-crop path.
+const tileToTopDown = (
+    render: IsolatedRenderResult,
+    cropX: number,
+    cropY: number,
+): { texture: Live2dTexture; cropX: number; cropY: number } => {
+    const rgba = new Uint8Array(render.rgba.length);
+    const rowBytes = render.width * 4;
+    for (let row = 0; row < render.height; row += 1) {
+        const sourceRow = render.height - 1 - row;
+        rgba.set(render.rgba.subarray(sourceRow * rowBytes, sourceRow * rowBytes + rowBytes), row * rowBytes);
+    }
+    return { texture: { width: render.width, height: render.height, rgba }, cropX, cropY };
 };
 
 /** Bumped with every pipeline behavior change so stale bakes are detectable. */
@@ -220,10 +239,15 @@ export const buildLive2dModel = async (options: BuildOptions): Promise<{
                     continue;
                 }
                 onProgress?.('textures', index, drawables.length, drawable.label);
-                const composed = renderDrawable2D
+                // [UV texture path] When enabled, bake textures from the real 3D
+                // render so source UV texture detail is preserved. The 2D
+                // overlay is skipped entirely in this mode; it only produces
+                // flat per-part colors.
+                const useUvTexture = (globalThis as any).__uvTexturePick === true;
+                const useBboxTile = useUvTexture && (globalThis as any).__uvBboxTile === true;
+                const composed = !useUvTexture && renderDrawable2D
                     ? await renderDrawable2D(drawable.leafIds, neutralCamera, textureViewport, drawable, neutral)
                     : null;
-                const render = composed ?? renderIsolated(drawable.leafIds, neutralCamera, textureViewport, drawable);
                 const neutralBounds = drawableBoundsAtNeutral(drawable, neutral);
                 const bounds = {
                     minX: neutralBounds.minX * textureScale,
@@ -231,7 +255,28 @@ export const buildLive2dModel = async (options: BuildOptions): Promise<{
                     maxX: neutralBounds.maxX * textureScale,
                     maxY: neutralBounds.maxY * textureScale,
                 };
-                const cropped = cropTopDown(render, bounds, texturePad * textureScale, textureViewport);
+                // [bbox tile] UV path only: render straight into a small
+                // tile RT sized to this part's crop rect (+ pad), instead of a
+                // full 4096x4096 RT that is 99% thrown away. The default path is
+                // byte-for-byte unchanged when the flag is off.
+                let cropped: { texture: Live2dTexture; cropX: number; cropY: number };
+                if (useBboxTile) {
+                    const pad = texturePad * textureScale;
+                    const x1 = Math.max(0, Math.floor(bounds.minX - pad));
+                    const y1 = Math.max(0, Math.floor(bounds.minY - pad));
+                    const x2 = Math.min(textureViewport.width, Math.ceil(bounds.maxX + pad));
+                    const y2 = Math.min(textureViewport.height, Math.ceil(bounds.maxY + pad));
+                    const tile = {
+                        x: x1, y: y1,
+                        width: Math.max(1, x2 - x1),
+                        height: Math.max(1, y2 - y1),
+                    };
+                    const tileRender = renderIsolated(drawable.leafIds, neutralCamera, textureViewport, drawable, tile);
+                    cropped = tileToTopDown(tileRender, x1, y1);
+                } else {
+                    const render = composed ?? renderIsolated(drawable.leafIds, neutralCamera, textureViewport, drawable);
+                    cropped = cropTopDown(render, bounds, texturePad * textureScale, textureViewport);
+                }
                 bakedTextures.set(drawable.id, cropped);
             }};
             await renderTextures();

@@ -137,6 +137,8 @@ class GpuPartRasterizer {
     private maskTexture: GPUTextureLike | null = null;
     private rawDepthTexture: GPUTextureLike | null = null;
     private completedDepthTexture: GPUTextureLike | null = null;
+    // [device recovery] rebuild GPU resources when the shared device is replaced.
+    private generation = -1;
     private atlasWidth = 1;
     private atlasHeight = 1;
 
@@ -315,8 +317,21 @@ class GpuPartRasterizer {
     }
 
     private async getDevice() {
+        const ctx = getSharedWebGpuContext();
+        const gen = ctx.getGeneration();
+        if (this.generation !== gen) {
+            this.generation = gen;
+            this.devicePromise = null;
+            this.rasterPipeline = null;
+            this.completionPipeline = null;
+            this.rasterBindGroupLayout = null;
+            this.completionBindGroupLayout = null;
+            this.maskTexture = null;
+            this.rawDepthTexture = null;
+            this.completedDepthTexture = null;
+        }
         if (!this.devicePromise) {
-            this.devicePromise = getSharedWebGpuContext().getDevice();
+            this.devicePromise = ctx.getDevice();
         }
         return this.devicePromise;
     }
