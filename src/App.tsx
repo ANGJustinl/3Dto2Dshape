@@ -1191,6 +1191,18 @@ function App({
                 }
             };
 
+            // A full-size bake renders hundreds of same-size parts. Reuse
+            // their target so the driver need not retire a framebuffer per part.
+            const isolatedTarget = new THREE.WebGLRenderTarget(1, 1, {
+                depthBuffer: true,
+                stencilBuffer: false,
+                samples: useUv ? 4 : 0,
+            });
+            const checkBakeContext = () => {
+                if (renderer.getContext().isContextLost()) {
+                    throw new Error('The graphics context was lost. Wait for the viewport to recover, then retry with tiles or a lower resolution.');
+                }
+            };
             const renderIsolated = (
                 leafIds: string[],
                 isoCamera: THREE.PerspectiveCamera,
@@ -1199,101 +1211,75 @@ function App({
                 tile?: { x: number; y: number; width: number; height: number },
             ): IsolatedRenderResult => {
                 const leafIdSet = new Set(leafIds);
-                // [MSAA] MSAA for the UV texture path only. The on-screen
-                // renderer has antialias:true, but this offscreen target did not:
-                // every silhouette was a hard alpha step and looked jagged after
-                // the desktop pet scaled it up. samples:4 resolves on readback.
-                // [occlusion mask] Reproduce the flat-paint visibility mask inside
-                // the same small tile RT: erase pixels where this drawable sits
-                // BEHIND a nearer part (e.g. a headscarf drawn over the face). No
-                // second full-screen renderer, no bypass of the bbox tile. Off for
-                // the flat-paint path and any non-tile render.
                 const useOcclusion = useUv && !!tile && textureOptions.occlusionMask;
-                // [bbox tile] The old code rendered EVERY part into a full
-                // viewport-sized RT (4096x4096 at HD) then cropped away ~99% of
-                // it. That is what exhausted the 8GB card. When a tile rect is
-                // supplied, render just that rect into a small RT; setViewOffset
-                // keeps the projection pixel-identical to the full-screen pass.
-                const rtWidth = tile ? Math.max(1, Math.round(tile.width)) : viewport.width;
-                const rtHeight = tile ? Math.max(1, Math.round(tile.height)) : viewport.height;
-                const renderTarget = new THREE.WebGLRenderTarget(rtWidth, rtHeight, {
-                    depthBuffer: true,
-                    stencilBuffer: false,
-                    samples: useUv ? 4 : 0,
-                });
+                const rtWidth = tile?.width ?? viewport.width;
+                const rtHeight = tile?.height ?? viewport.height;
+                isolatedTarget.setSize(rtWidth, rtHeight);
+                const rgba = new Uint8Array(rtWidth * rtHeight * 4);
                 const savedAspect = isoCamera.aspect;
                 const savedView = isoCamera.view ? { ...isoCamera.view } : null;
-                if (tile) {
-                    isoCamera.setViewOffset(viewport.width, viewport.height, tile.x, tile.y, rtWidth, rtHeight);
-                    isoCamera.aspect = savedAspect; // setViewOffset resets aspect; keep the full-screen projection
-                    isoCamera.updateProjectionMatrix();
-                }
-                const materialVisibility = new Map<THREE.Material, boolean>();
-                const materialColorWrite = new Map<THREE.Material, boolean>();
-                const materialDepthWrite = new Map<THREE.Material, boolean>();
-                const materialDepthFunc = new Map<THREE.Material, THREE.Material['depthFunc']>();
-                bakeMaterials.forEach((material, leafId) => {
-                    materialVisibility.set(material, material.visible);
-                    materialColorWrite.set(material, material.colorWrite);
-                    materialDepthWrite.set(material, material.depthWrite);
-                    materialDepthFunc.set(material, material.depthFunc);
-                    material.visible = leafIdSet.has(leafId);
-                });
+                const previousTarget = renderer.getRenderTarget();
                 const previousBackground = bakeScene.background;
+                const previousClearColor = renderer.getClearColor(new THREE.Color());
                 const previousClearAlpha = renderer.getClearAlpha();
                 const previousAutoClear = renderer.autoClear;
-                bakeScene.background = null;
-                renderer.setRenderTarget(renderTarget);
-                renderer.setClearColor(0x000000, 0);
-                renderer.clear();
-                if (useOcclusion) {
-                    // Two passes into the SAME small tile RT. Disable autoClear so
-                    // pass 2 keeps the depth buffer written by pass 1.
-                    renderer.autoClear = false;
-                    // Pass 1: depth prepass over the FULL scene (all leaves visible,
-                    // no color write). depthWrite is forced on even for transparent
-                    // MMD materials, matching the flat path's geometry depth.
-                    bakeMaterials.forEach((material) => {
-                        material.visible = true;
-                        material.colorWrite = false;
-                        material.depthWrite = true;
-                        material.depthFunc = THREE.LessEqualDepth;
-                    });
+                const materialStates = Array.from(bakeMaterials, ([leafId, material]) => ({
+                    material,
+                    selected: leafIdSet.has(leafId),
+                    visible: material.visible,
+                    colorWrite: material.colorWrite,
+                    depthWrite: material.depthWrite,
+                    depthFunc: material.depthFunc,
+                }));
+
+                try {
+                    if (tile) {
+                        isoCamera.setViewOffset(viewport.width, viewport.height, tile.x, tile.y, rtWidth, rtHeight);
+                        isoCamera.aspect = savedAspect;
+                        isoCamera.updateProjectionMatrix();
+                    }
+                    bakeScene.background = null;
+                    renderer.setRenderTarget(isolatedTarget);
+                    renderer.setClearColor(0x000000, 0);
+                    renderer.clear();
+                    if (useOcclusion) {
+                        // Keep the whole scene's nearest depth for the isolated color pass.
+                        renderer.autoClear = false;
+                        for (const { material } of materialStates) {
+                            material.visible = true;
+                            material.colorWrite = false;
+                            material.depthWrite = true;
+                            material.depthFunc = THREE.LessEqualDepth;
+                        }
+                        renderer.render(bakeScene, isoCamera);
+                    }
+                    for (const { material, selected } of materialStates) {
+                        material.visible = selected;
+                        if (useOcclusion) {
+                            material.colorWrite = true;
+                            material.depthWrite = false;
+                        }
+                    }
                     renderer.render(bakeScene, isoCamera);
-                    // Pass 2: only this drawable writes color. LessEqual + no depth
-                    // write means a pixel survives only where this part is at or in
-                    // front of the nearest full-scene surface (i.e. not covered).
-                    bakeMaterials.forEach((material, leafId) => {
-                        material.visible = leafIdSet.has(leafId);
-                        material.colorWrite = true;
-                        material.depthWrite = false;
-                        material.depthFunc = THREE.LessEqualDepth;
-                    });
-                    renderer.render(bakeScene, isoCamera);
+                    renderer.readRenderTargetPixels(isolatedTarget, 0, 0, rtWidth, rtHeight, rgba);
+                    checkBakeContext();
+                } finally {
+                    for (const state of materialStates) {
+                        state.material.visible = state.visible;
+                        state.material.colorWrite = state.colorWrite;
+                        state.material.depthWrite = state.depthWrite;
+                        state.material.depthFunc = state.depthFunc;
+                    }
+                    if (tile) {
+                        isoCamera.view = savedView;
+                        isoCamera.aspect = savedAspect;
+                        isoCamera.updateProjectionMatrix();
+                    }
                     renderer.autoClear = previousAutoClear;
-                } else {
-                    renderer.render(bakeScene, isoCamera);
+                    renderer.setRenderTarget(previousTarget);
+                    renderer.setClearColor(previousClearColor, previousClearAlpha);
+                    bakeScene.background = previousBackground;
                 }
-                const rgba = new Uint8Array(rtWidth * rtHeight * 4);
-                renderer.readRenderTargetPixels(renderTarget, 0, 0, rtWidth, rtHeight, rgba);
-                renderer.setRenderTarget(null);
-                if (tile) {
-                    if (savedView) isoCamera.view = savedView;
-                    else isoCamera.clearViewOffset();
-                    isoCamera.aspect = savedAspect;
-                    isoCamera.updateProjectionMatrix();
-                }
-                bakeScene.background = previousBackground;
-                renderer.setClearAlpha(previousClearAlpha);
-                materialVisibility.forEach((visible, material) => {
-                    material.visible = visible;
-                });
-                if (useOcclusion) {
-                    materialColorWrite.forEach((value, material) => { material.colorWrite = value; });
-                    materialDepthWrite.forEach((value, material) => { material.depthWrite = value; });
-                    materialDepthFunc.forEach((value, material) => { material.depthFunc = value; });
-                }
-                renderTarget.dispose();
                 // [diagnostic] count non-transparent pixels read back
                 if (!(window as any).__isoStats) (window as any).__isoStats = [];
                 let nonZero = 0;
@@ -1320,6 +1306,7 @@ function App({
                     textureScale,
                     textureOptions,
                 });
+                checkBakeContext();
                 console.log('Live2D model built.', {
                     drawables: builtModel.drawables.length,
                     order: builtModel.order,
@@ -1327,7 +1314,11 @@ function App({
                     orderFlips: builtModel.orderReport.flips.length,
                 });
                 return { model: builtModel, summary: summarizeBake(bundle) };
+            } catch (error) {
+                checkBakeContext();
+                throw error;
             } finally {
+                isolatedTarget.dispose();
                 playbackPausedRef.current = previousPaused;
                 setIsPlaybackPaused(previousPaused);
                 forceProjectionRefreshRef.current = true;

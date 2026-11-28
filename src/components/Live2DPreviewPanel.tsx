@@ -28,6 +28,7 @@ type RoundtripResult = {
 const Live2DPreviewPanel = ({ model, onImportModel }: Live2DPreviewPanelProps) => {
     const canvasRef = useRef<HTMLCanvasElement | null>(null);
     const runtimeRef = useRef<Live2dPreviewRuntime | null>(null);
+    const [previewError, setPreviewError] = useState<string | null>(null);
     const [assignment, setAssignment] = useState<ParamAssignment>(() => {
         const initial = {} as ParamAssignment;
         model.params.forEach((param) => {
@@ -51,7 +52,14 @@ const Live2DPreviewPanel = ({ model, onImportModel }: Live2DPreviewPanelProps) =
         if (!canvas) {
             return;
         }
-        const runtime = new Live2dPreviewRuntime(canvas, model);
+        let runtime: Live2dPreviewRuntime;
+        try {
+            runtime = new Live2dPreviewRuntime(canvas, model);
+        } catch {
+            setPreviewError('The graphics context is unavailable. Retry baking after the viewport has recovered.');
+            return;
+        }
+        setPreviewError(null);
         runtimeRef.current = runtime;
         setMotion(null);
         setPlaying(false);
@@ -313,6 +321,7 @@ const Live2DPreviewPanel = ({ model, onImportModel }: Live2DPreviewPanelProps) =
         <details className="export-panel" open>
             <summary>Live2D Preview</summary>
             <div className="export-panel-body">
+                {previewError && <div className="export-error" role="alert">{previewError}</div>}
                 <canvas
                     ref={canvasRef}
                     className="live2d-preview-canvas"
