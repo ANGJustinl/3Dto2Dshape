@@ -8,6 +8,7 @@ import Live2dBakePanel from './Live2dBakePanel';
 import Live2DPreviewPanel from './Live2DPreviewPanel';
 import type { ExportVideoSettings } from '../lib/export/videoExporter';
 import type { BakeSummary } from '../lib/live2d/bakeSummary';
+import type { BakeTextureOptions } from '../lib/live2d/bakeTextureOptions';
 import type { Live2dModel } from '../lib/live2d/model';
 import { FLICKER_PRESETS } from '../lib/2DRenderPipeline/temporalPaint';
 
@@ -41,6 +42,7 @@ type PartPanelProps = {
   onBuildLive2d: (
     onProgress: (stage: 'samples' | 'textures', done: number, total: number, detail: string) => void,
     textureScale: number,
+    textureOptions: BakeTextureOptions,
   ) => Promise<BakeSummary>;
   live2dModel: Live2dModel | null;
   onImportLive2dModel: (model: Live2dModel) => void;

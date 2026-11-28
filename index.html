@@ -8,6 +8,19 @@
   </head>
   <body>
     <div id="root"></div>
+    <script>
+      // [three.js guard] three.js r171 calls .trim() on getProgramInfoLog()
+      // which may return null when the WebGL context is stressed. Normalize it.
+      (function () {
+        for (const proto of [WebGLRenderingContext.prototype, WebGL2RenderingContext.prototype]) {
+          for (const key of ['getProgramInfoLog', 'getShaderInfoLog']) {
+            const orig = proto[key];
+            if (!orig) continue;
+            proto[key] = function () { return orig.apply(this, arguments) || ''; };
+          }
+        }
+      })();
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
   </html>

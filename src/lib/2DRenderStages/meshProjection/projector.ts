@@ -114,6 +114,8 @@ class WebGpuProjectionPipeline {
     private queue: GPUQueueLike | null = null;
     private computePipeline: GPUComputePipelineLike | null = null;
     private computeBindGroupLayout: any = null;
+    // [device recovery] rebuild GPU resources when the shared device is replaced.
+    private generation = -1;
     private resourcesByMesh = new WeakMap<MeshLike, MeshGpuResources>();
     private completedFrames = new Map<number, ProjectionFrameResult>();
     private waitersByFrame = new Map<number, Array<(ready: boolean) => void>>();
@@ -266,6 +268,24 @@ class WebGpuProjectionPipeline {
             try {
                 await this.runRequest(request);
             } catch (error) {
+                const msg = String((error as any)?.message ?? '');
+                const lostRelated = /external Instance reference|device (is )?lost|Device was destroyed|GPUBuffer/i.test(msg) || (error as any)?.name === 'AbortError';
+                // [device recovery] on device loss, force the shared layer to hand
+                // out a fresh device and retry this exact frame once. Without
+                // this the stale device rejects every subsequent mapAsync.
+                if (lostRelated && !(request as any).__retried) {
+                    console.warn('[PROJ_RETRY]', JSON.stringify({ frameId: request.frameId, message: msg.slice(0, 160), t: Date.now() }));
+                    (getSharedWebGpuContext() as any).invalidateForRetry?.();
+                    this.generation = -1;
+                    (request as any).__retried = true;
+                    try {
+                        await this.runRequest(request);
+                        continue;
+                    } catch (retryError) {
+                        console.warn('[PROJ_RETRY_FAIL]', JSON.stringify({ frameId: request.frameId, message: String((retryError as any)?.message ?? '').slice(0, 160) }));
+                    }
+                }
+                console.warn('[PROJ_FAIL]', JSON.stringify({ frameId: request.frameId, meshCount: request.meshSnapshots.length, name: (error as any)?.name, message: msg.slice(0, 160), t: Date.now() }));
                 console.warn('WebGPU projection frame failed. Falling back to CPU projection path.', error);
                 this.resolveFrameWaiters(request.frameId, false);
             }
@@ -275,13 +295,30 @@ class WebGpuProjectionPipeline {
     }
 
     private async getDevice() {
+        const ctx = getSharedWebGpuContext();
+        const gen = ctx.getGeneration();
+        // [device recovery] a lost device invalidates every buffer/pipeline built
+        // from it. Drop them so ensureResources/createComputePipeline rebuild
+        // against the fresh device.
+        if (this.generation !== gen) {
+            this.generation = gen;
+            this.device = null;
+            this.devicePromise = null;
+            this.queue = null;
+            this.computePipeline = null;
+            this.computeBindGroupLayout = null;
+            this.resourcesByMesh = new WeakMap<MeshLike, MeshGpuResources>();
+            this.retiredResources.clear();
+            this.completedFrames.clear();
+        }
+
         if (this.device) {
             return this.device;
         }
 
         if (!this.devicePromise) {
             this.devicePromise = (async () => {
-                const device = await getSharedWebGpuContext().getDevice();
+                const device = await ctx.getDevice();
                 if (!device) {
                     return null;
                 }

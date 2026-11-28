@@ -5,6 +5,7 @@ import { frameFrontCamera } from './lib/live2d/frontCamera';
 import { MMDAnimationHelper } from 'three/examples/jsm/animation/MMDAnimationHelper.js';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { MMDLoader } from 'three/examples/jsm/loaders/MMDLoader.js';
+import { clone as cloneSkinnedModel } from 'three/examples/jsm/utils/SkeletonUtils.js';
 import { ensureAmmo } from './lib/ammo';
 import PartPanel from './components/PartPanel';
 import ProjectionOverlay, { type ProjectionOverlayHandle } from './components/ProjectionOverlay';
@@ -37,6 +38,7 @@ import {
     type ExportVideoSettings,
 } from './lib/export/videoExporter';
 import { buildLive2dModel, type IsolatedRenderResult } from './lib/live2d/build';
+import type { BakeTextureOptions } from './lib/live2d/bakeTextureOptions';
 import { summarizeBake, type BakeSummary } from './lib/live2d/bakeSummary';
 import type { Live2dModel } from './lib/live2d/model';
 import type { DrawableDecomposition } from './lib/live2d/decomposition';
@@ -245,11 +247,11 @@ type AppProps = {
     sourceBusy?: boolean;
 };
 
-function disposeModelResources(root: THREE.Object3D) {
+function disposeModelResources(...roots: THREE.Object3D[]) {
     const geometries = new Set<THREE.BufferGeometry>();
     const materials = new Set<THREE.Material>();
     const textures = new Set<THREE.Texture>();
-    root.traverse((object) => {
+    const collect = (object: THREE.Object3D) => {
         if (!(object instanceof THREE.Mesh)) return;
         geometries.add(object.geometry);
         for (const material of Array.isArray(object.material) ? object.material : [object.material]) {
@@ -259,7 +261,8 @@ function disposeModelResources(root: THREE.Object3D) {
             }
         }
         if (object instanceof THREE.SkinnedMesh) object.skeleton.dispose();
-    });
+    };
+    roots.forEach((root) => root.traverse(collect));
     textures.forEach((texture) => texture.dispose());
     materials.forEach((material) => material.dispose());
     geometries.forEach((geometry) => geometry.dispose());
@@ -300,6 +303,7 @@ function App({
         ((
             onProgress: (stage: 'samples' | 'textures', done: number, total: number, detail: string) => void,
             textureScale: number,
+            textureOptions: BakeTextureOptions,
         ) => Promise<{ model: Live2dModel; summary: BakeSummary }>) | null
     >(null);
     const [parts, setParts] = useState<PartNode[]>([]);
@@ -409,6 +413,16 @@ function App({
 
         const scene = new THREE.Scene();
         scene.background = new THREE.Color(0x87ceeb);
+
+        // Keep the MMD lights and source materials off the live viewport.
+        const uvScene = new THREE.Scene();
+        const key = new THREE.DirectionalLight(0xffffff, 1.4);
+        key.position.set(-8, 16, 24);
+        const fill = new THREE.DirectionalLight(0xffffff, 0.6);
+        fill.position.set(12, 6, 10);
+        uvScene.add(new THREE.AmbientLight(0xffffff, 2), key, fill);
+        let uvRoot: THREE.Object3D | null = null;
+        let uvSegmentation: ReturnType<typeof splitModelParts> | undefined;
 
         const camera = new THREE.PerspectiveCamera(
             35,
@@ -688,6 +702,10 @@ function App({
         stepForwardStrideFramesRef.current = () => stepAnimationByFrames(frameStrideRef.current);
 
         const applySegmentation = (targetModel: THREE.Object3D) => {
+            // Flat segmentation replaces geometry groups and materials. Keep an
+            // independent skeleton with the original groups for on-demand UV bakes.
+            uvRoot = cloneSkinnedModel(targetModel);
+            uvScene.add(uvRoot);
             const segmentation = splitModelParts(targetModel);
             leafMaterialMapRef.current = segmentation.leafMaterialMap;
             projectionPartsRef.current = segmentation.projectionParts;
@@ -1038,13 +1056,20 @@ function App({
         // playback is paused. renderIsolated renders only the given leaves to
         // an offscreen target with the bake camera; the animate loop cannot
         // interleave because each call is synchronous.
-        buildLive2dRef.current = async (onProgress, textureScale = 2) => {
+        buildLive2dRef.current = async (onProgress, textureScale, textureOptions) => {
             const root = modelRef.current;
-            const bakeParts = projectionPartsRef.current;
             const maskState = projectionMaskStateRef.current;
-            if (!root || bakeParts.length === 0 || !maskState) {
+            if (!root || !uvRoot || !projectionPartsRef.current.length || !maskState) {
                 throw new Error('Model segmentation is not ready yet.');
             }
+            const useUv = textureOptions.source === 'uv';
+            if (useUv && !uvSegmentation) {
+                uvSegmentation = splitModelParts(uvRoot, initialModelName, true);
+            }
+            const source = useUv ? uvSegmentation : undefined;
+            const bakeParts = source?.projectionParts ?? projectionPartsRef.current;
+            const bakeMaterials = source?.leafMaterialMap ?? leafMaterialMapRef.current;
+            const bakeScene = useUv ? uvScene : scene;
 
             // 3渲2 texture source: run the stylized 2D pipeline per drawable
             // (paint layers + contours, matching the right-hand 2D view) on a
@@ -1166,40 +1191,102 @@ function App({
                 }
             };
 
+            // A full-size bake renders hundreds of same-size parts. Reuse
+            // their target so the driver need not retire a framebuffer per part.
+            const isolatedTarget = new THREE.WebGLRenderTarget(1, 1, {
+                depthBuffer: true,
+                stencilBuffer: false,
+                samples: useUv ? 4 : 0,
+            });
+            const checkBakeContext = () => {
+                if (renderer.getContext().isContextLost()) {
+                    throw new Error('The graphics context was lost. Wait for the viewport to recover, then retry with tiles or a lower resolution.');
+                }
+            };
             const renderIsolated = (
                 leafIds: string[],
                 isoCamera: THREE.PerspectiveCamera,
                 viewport: { width: number; height: number },
+                _drawable?: unknown,
+                tile?: { x: number; y: number; width: number; height: number },
             ): IsolatedRenderResult => {
                 const leafIdSet = new Set(leafIds);
-                const renderTarget = new THREE.WebGLRenderTarget(viewport.width, viewport.height, {
-                    depthBuffer: true,
-                    stencilBuffer: false,
-                });
-                const materialVisibility = new Map<THREE.Material, boolean>();
-                leafMaterialMapRef.current.forEach((material, leafId) => {
-                    materialVisibility.set(material, material.visible);
-                    material.visible = leafIdSet.has(leafId);
-                });
-                const previousBackground = scene.background;
+                const useOcclusion = useUv && !!tile && textureOptions.occlusionMask;
+                const rtWidth = tile?.width ?? viewport.width;
+                const rtHeight = tile?.height ?? viewport.height;
+                isolatedTarget.setSize(rtWidth, rtHeight);
+                const rgba = new Uint8Array(rtWidth * rtHeight * 4);
+                const savedAspect = isoCamera.aspect;
+                const savedView = isoCamera.view ? { ...isoCamera.view } : null;
+                const previousTarget = renderer.getRenderTarget();
+                const previousBackground = bakeScene.background;
+                const previousClearColor = renderer.getClearColor(new THREE.Color());
                 const previousClearAlpha = renderer.getClearAlpha();
-                scene.background = null;
-                renderer.setRenderTarget(renderTarget);
-                renderer.setClearColor(0x000000, 0);
-                renderer.clear();
-                renderer.render(scene, isoCamera);
-                const rgba = new Uint8Array(viewport.width * viewport.height * 4);
-                renderer.readRenderTargetPixels(renderTarget, 0, 0, viewport.width, viewport.height, rgba);
-                renderer.setRenderTarget(null);
-                scene.background = previousBackground;
-                renderer.setClearAlpha(previousClearAlpha);
-                materialVisibility.forEach((visible, material) => {
-                    material.visible = visible;
-                });
-                renderTarget.dispose();
-                return { rgba, width: viewport.width, height: viewport.height };
-            };
+                const previousAutoClear = renderer.autoClear;
+                const materialStates = Array.from(bakeMaterials, ([leafId, material]) => ({
+                    material,
+                    selected: leafIdSet.has(leafId),
+                    visible: material.visible,
+                    colorWrite: material.colorWrite,
+                    depthWrite: material.depthWrite,
+                    depthFunc: material.depthFunc,
+                }));
 
+                try {
+                    if (tile) {
+                        isoCamera.setViewOffset(viewport.width, viewport.height, tile.x, tile.y, rtWidth, rtHeight);
+                        isoCamera.aspect = savedAspect;
+                        isoCamera.updateProjectionMatrix();
+                    }
+                    bakeScene.background = null;
+                    renderer.setRenderTarget(isolatedTarget);
+                    renderer.setClearColor(0x000000, 0);
+                    renderer.clear();
+                    if (useOcclusion) {
+                        // Keep the whole scene's nearest depth for the isolated color pass.
+                        renderer.autoClear = false;
+                        for (const { material } of materialStates) {
+                            material.visible = true;
+                            material.colorWrite = false;
+                            material.depthWrite = true;
+                            material.depthFunc = THREE.LessEqualDepth;
+                        }
+                        renderer.render(bakeScene, isoCamera);
+                    }
+                    for (const { material, selected } of materialStates) {
+                        material.visible = selected;
+                        if (useOcclusion) {
+                            material.colorWrite = true;
+                            material.depthWrite = false;
+                        }
+                    }
+                    renderer.render(bakeScene, isoCamera);
+                    renderer.readRenderTargetPixels(isolatedTarget, 0, 0, rtWidth, rtHeight, rgba);
+                    checkBakeContext();
+                } finally {
+                    for (const state of materialStates) {
+                        state.material.visible = state.visible;
+                        state.material.colorWrite = state.colorWrite;
+                        state.material.depthWrite = state.depthWrite;
+                        state.material.depthFunc = state.depthFunc;
+                    }
+                    if (tile) {
+                        isoCamera.view = savedView;
+                        isoCamera.aspect = savedAspect;
+                        isoCamera.updateProjectionMatrix();
+                    }
+                    renderer.autoClear = previousAutoClear;
+                    renderer.setRenderTarget(previousTarget);
+                    renderer.setClearColor(previousClearColor, previousClearAlpha);
+                    bakeScene.background = previousBackground;
+                }
+                // [diagnostic] count non-transparent pixels read back
+                if (!(window as any).__isoStats) (window as any).__isoStats = [];
+                let nonZero = 0;
+                for (let i = 3; i < rgba.length; i += 4) if (rgba[i] > 0) nonZero++;
+                (window as any).__isoStats.push({ leaves: leafIds.length, size: `${rtWidth}x${rtHeight}`, nonZero, total: rgba.length / 4, tile: !!tile });
+                return { rgba, width: rtWidth, height: rtHeight };
+            };
             const previousPaused = playbackPausedRef.current;
             playbackPausedRef.current = true;
             setIsPlaybackPaused(true);
@@ -1207,7 +1294,7 @@ function App({
             forceNewProjectionFrameRef.current = false;
             try {
                 const { model: builtModel, bundle } = await buildLive2dModel({
-                    root,
+                    root: useUv ? uvRoot : root,
                     parts: bakeParts,
                     camera,
                     projector: webGpuProjector,
@@ -1217,7 +1304,9 @@ function App({
                     renderIsolated,
                     onProgress,
                     textureScale,
+                    textureOptions,
                 });
+                checkBakeContext();
                 console.log('Live2D model built.', {
                     drawables: builtModel.drawables.length,
                     order: builtModel.order,
@@ -1225,7 +1314,11 @@ function App({
                     orderFlips: builtModel.orderReport.flips.length,
                 });
                 return { model: builtModel, summary: summarizeBake(bundle) };
+            } catch (error) {
+                checkBakeContext();
+                throw error;
             } finally {
+                isolatedTarget.dispose();
                 playbackPausedRef.current = previousPaused;
                 setIsPlaybackPaused(previousPaused);
                 forceProjectionRefreshRef.current = true;
@@ -1252,6 +1345,7 @@ function App({
             modelRef.current = null;
             leafMaterialMapRef.current.clear();
             webGpuProjector.releaseMeshes(projectionPartsRef.current.map((part) => part.mesh));
+            if (uvSegmentation) webGpuProjector.releaseMeshes(uvSegmentation.projectionParts.map((part) => part.mesh));
             projectionPartsRef.current = [];
             projectionMaskStateRef.current = null;
             window.removeEventListener('resize', onResize);
@@ -1261,7 +1355,7 @@ function App({
             controls.dispose();
             controlsRef.current = null;
             renderer.setAnimationLoop(null);
-            if (model) disposeModelResources(model);
+            if (model) disposeModelResources(model, uvScene);
             renderer.dispose();
             mount.removeChild(renderer.domElement);
         };
@@ -1302,6 +1396,7 @@ function App({
     const handleBuildLive2d = async (
         onProgress: (stage: 'samples' | 'textures', done: number, total: number, detail: string) => void,
         textureScale: number,
+        textureOptions: BakeTextureOptions,
     ): Promise<BakeSummary> => {
         const runner = buildLive2dRef.current;
         if (!runner || assetStatus !== 'ready') {
@@ -1313,7 +1408,7 @@ function App({
         onOperationStateChange?.(true);
         if (controlsRef.current) controlsRef.current.enabled = false;
         try {
-            const { model, summary } = await runner(onProgress, textureScale);
+            const { model, summary } = await runner(onProgress, textureScale, textureOptions);
             setLive2dModel(model);
             return summary;
         } finally {
