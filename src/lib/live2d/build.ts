@@ -30,6 +30,7 @@ import {extendForegroundPaint} from './foregroundPaint';
 import {captureAnatomicalHeadSource,frameAnatomicalHeadSource,type AnatomicalHeadSource} from './anchoredHeadSource';
 import type { ProjectionPartSource } from '../modelParts';
 import type { BakeBundle, BakeSample } from './types';
+import { initialBakeTextureOptions, type BakeTextureOptions } from './bakeTextureOptions';
 
 /**
  * M1-M3 assembly: face bake -> pose-invariant decomposition -> isolated
@@ -60,6 +61,7 @@ export type BuildOptions = {
     texturePad?: number;
     /** Supersample factor for baked drawable textures (1 = viewport resolution). */
     textureScale?: number;
+    textureOptions?: BakeTextureOptions;
     /**
      * Preferred texture source: the stylized 2D composition pipeline (paint
      * layers + contours). Returns bottom-up RGBA like renderIsolated, or
@@ -168,10 +170,13 @@ export const buildLive2dModel = async (options: BuildOptions): Promise<{
         seed,
         texturePad = 12,
         textureScale = 1,
+        textureOptions = initialBakeTextureOptions(),
         renderDrawable2D,
         renderIsolated,
         onProgress,
     } = options;
+    const useUvTexture = textureOptions.source === 'uv';
+    const useBboxTile = useUvTexture && textureOptions.tileParts;
 
     if (!projector.isSupported()) {
         throw new Error('WebGPU projection is not available; Live2D build requires it.');
@@ -239,12 +244,6 @@ export const buildLive2dModel = async (options: BuildOptions): Promise<{
                     continue;
                 }
                 onProgress?.('textures', index, drawables.length, drawable.label);
-                // [UV texture path] When enabled, bake textures from the real 3D
-                // render so source UV texture detail is preserved. The 2D
-                // overlay is skipped entirely in this mode; it only produces
-                // flat per-part colors.
-                const useUvTexture = (globalThis as any).__uvTexturePick === true;
-                const useBboxTile = useUvTexture && (globalThis as any).__uvBboxTile === true;
                 const composed = !useUvTexture && renderDrawable2D
                     ? await renderDrawable2D(drawable.leafIds, neutralCamera, textureViewport, drawable, neutral)
                     : null;

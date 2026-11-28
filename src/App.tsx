@@ -5,6 +5,7 @@ import { frameFrontCamera } from './lib/live2d/frontCamera';
 import { MMDAnimationHelper } from 'three/examples/jsm/animation/MMDAnimationHelper.js';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { MMDLoader } from 'three/examples/jsm/loaders/MMDLoader.js';
+import { clone as cloneSkinnedModel } from 'three/examples/jsm/utils/SkeletonUtils.js';
 import { ensureAmmo } from './lib/ammo';
 import PartPanel from './components/PartPanel';
 import ProjectionOverlay, { type ProjectionOverlayHandle } from './components/ProjectionOverlay';
@@ -37,6 +38,7 @@ import {
     type ExportVideoSettings,
 } from './lib/export/videoExporter';
 import { buildLive2dModel, type IsolatedRenderResult } from './lib/live2d/build';
+import type { BakeTextureOptions } from './lib/live2d/bakeTextureOptions';
 import { summarizeBake, type BakeSummary } from './lib/live2d/bakeSummary';
 import type { Live2dModel } from './lib/live2d/model';
 import type { DrawableDecomposition } from './lib/live2d/decomposition';
@@ -245,11 +247,11 @@ type AppProps = {
     sourceBusy?: boolean;
 };
 
-function disposeModelResources(root: THREE.Object3D) {
+function disposeModelResources(...roots: THREE.Object3D[]) {
     const geometries = new Set<THREE.BufferGeometry>();
     const materials = new Set<THREE.Material>();
     const textures = new Set<THREE.Texture>();
-    root.traverse((object) => {
+    const collect = (object: THREE.Object3D) => {
         if (!(object instanceof THREE.Mesh)) return;
         geometries.add(object.geometry);
         for (const material of Array.isArray(object.material) ? object.material : [object.material]) {
@@ -259,7 +261,8 @@ function disposeModelResources(root: THREE.Object3D) {
             }
         }
         if (object instanceof THREE.SkinnedMesh) object.skeleton.dispose();
-    });
+    };
+    roots.forEach((root) => root.traverse(collect));
     textures.forEach((texture) => texture.dispose());
     materials.forEach((material) => material.dispose());
     geometries.forEach((geometry) => geometry.dispose());
@@ -300,6 +303,7 @@ function App({
         ((
             onProgress: (stage: 'samples' | 'textures', done: number, total: number, detail: string) => void,
             textureScale: number,
+            textureOptions: BakeTextureOptions,
         ) => Promise<{ model: Live2dModel; summary: BakeSummary }>) | null
     >(null);
     const [parts, setParts] = useState<PartNode[]>([]);
@@ -410,24 +414,15 @@ function App({
         const scene = new THREE.Scene();
         scene.background = new THREE.Color(0x87ceeb);
 
-        // [UV materials] MMDToonMaterial declares lights:true and its toon/matcap
-        // shading is computed from scene lights. The earlier "clone MMDToonMaterial
-        // -> black silhouette" attempts never added any light to this scene.
-        // Add lights for the UV texture path so the real MMD material (matcap /
-        // toon gradient / additive blend) survives into the baked atlas. The
-        // flat-paint path uses MeshBasicMaterial, which ignores lights, so it
-        // stays byte-identical.
-        if ((window as any).__uvTexturePick === true) {
-            const ambient = new THREE.AmbientLight(0xffffff, 2.0);
-            scene.add(ambient);
-            const key = new THREE.DirectionalLight(0xffffff, 1.4);
-            key.position.set(-8, 16, 24);
-            scene.add(key);
-            const fill = new THREE.DirectionalLight(0xffffff, 0.6);
-            fill.position.set(12, 6, 10);
-            scene.add(fill);
-            console.log('[UV_LIT] scene lights added');
-        }
+        // Keep the MMD lights and source materials off the live viewport.
+        const uvScene = new THREE.Scene();
+        const key = new THREE.DirectionalLight(0xffffff, 1.4);
+        key.position.set(-8, 16, 24);
+        const fill = new THREE.DirectionalLight(0xffffff, 0.6);
+        fill.position.set(12, 6, 10);
+        uvScene.add(new THREE.AmbientLight(0xffffff, 2), key, fill);
+        let uvRoot: THREE.Object3D | null = null;
+        let uvSegmentation: ReturnType<typeof splitModelParts> | undefined;
 
         const camera = new THREE.PerspectiveCamera(
             35,
@@ -707,6 +702,10 @@ function App({
         stepForwardStrideFramesRef.current = () => stepAnimationByFrames(frameStrideRef.current);
 
         const applySegmentation = (targetModel: THREE.Object3D) => {
+            // Flat segmentation replaces geometry groups and materials. Keep an
+            // independent skeleton with the original groups for on-demand UV bakes.
+            uvRoot = cloneSkinnedModel(targetModel);
+            uvScene.add(uvRoot);
             const segmentation = splitModelParts(targetModel);
             leafMaterialMapRef.current = segmentation.leafMaterialMap;
             projectionPartsRef.current = segmentation.projectionParts;
@@ -1057,13 +1056,20 @@ function App({
         // playback is paused. renderIsolated renders only the given leaves to
         // an offscreen target with the bake camera; the animate loop cannot
         // interleave because each call is synchronous.
-        buildLive2dRef.current = async (onProgress, textureScale = 2) => {
+        buildLive2dRef.current = async (onProgress, textureScale, textureOptions) => {
             const root = modelRef.current;
-            const bakeParts = projectionPartsRef.current;
             const maskState = projectionMaskStateRef.current;
-            if (!root || bakeParts.length === 0 || !maskState) {
+            if (!root || !uvRoot || !projectionPartsRef.current.length || !maskState) {
                 throw new Error('Model segmentation is not ready yet.');
             }
+            const useUv = textureOptions.source === 'uv';
+            if (useUv && !uvSegmentation) {
+                uvSegmentation = splitModelParts(uvRoot, initialModelName, true);
+            }
+            const source = useUv ? uvSegmentation : undefined;
+            const bakeParts = source?.projectionParts ?? projectionPartsRef.current;
+            const bakeMaterials = source?.leafMaterialMap ?? leafMaterialMapRef.current;
+            const bakeScene = useUv ? uvScene : scene;
 
             // 3渲2 texture source: run the stylized 2D pipeline per drawable
             // (paint layers + contours, matching the right-hand 2D view) on a
@@ -1197,13 +1203,12 @@ function App({
                 // renderer has antialias:true, but this offscreen target did not:
                 // every silhouette was a hard alpha step and looked jagged after
                 // the desktop pet scaled it up. samples:4 resolves on readback.
-                const uvPick = (window as any).__uvTexturePick === true;
                 // [occlusion mask] Reproduce the flat-paint visibility mask inside
                 // the same small tile RT: erase pixels where this drawable sits
                 // BEHIND a nearer part (e.g. a headscarf drawn over the face). No
                 // second full-screen renderer, no bypass of the bbox tile. Off for
                 // the flat-paint path and any non-tile render.
-                const useOcclusion = uvPick && !!tile && (window as any).__uvOcclusionMask !== false;
+                const useOcclusion = useUv && !!tile && textureOptions.occlusionMask;
                 // [bbox tile] The old code rendered EVERY part into a full
                 // viewport-sized RT (4096x4096 at HD) then cropped away ~99% of
                 // it. That is what exhausted the 8GB card. When a tile rect is
@@ -1214,7 +1219,7 @@ function App({
                 const renderTarget = new THREE.WebGLRenderTarget(rtWidth, rtHeight, {
                     depthBuffer: true,
                     stencilBuffer: false,
-                    samples: uvPick ? 4 : 0,
+                    samples: useUv ? 4 : 0,
                 });
                 const savedAspect = isoCamera.aspect;
                 const savedView = isoCamera.view ? { ...isoCamera.view } : null;
@@ -1227,17 +1232,17 @@ function App({
                 const materialColorWrite = new Map<THREE.Material, boolean>();
                 const materialDepthWrite = new Map<THREE.Material, boolean>();
                 const materialDepthFunc = new Map<THREE.Material, THREE.Material['depthFunc']>();
-                leafMaterialMapRef.current.forEach((material, leafId) => {
+                bakeMaterials.forEach((material, leafId) => {
                     materialVisibility.set(material, material.visible);
                     materialColorWrite.set(material, material.colorWrite);
                     materialDepthWrite.set(material, material.depthWrite);
                     materialDepthFunc.set(material, material.depthFunc);
                     material.visible = leafIdSet.has(leafId);
                 });
-                const previousBackground = scene.background;
+                const previousBackground = bakeScene.background;
                 const previousClearAlpha = renderer.getClearAlpha();
                 const previousAutoClear = renderer.autoClear;
-                scene.background = null;
+                bakeScene.background = null;
                 renderer.setRenderTarget(renderTarget);
                 renderer.setClearColor(0x000000, 0);
                 renderer.clear();
@@ -1248,26 +1253,26 @@ function App({
                     // Pass 1: depth prepass over the FULL scene (all leaves visible,
                     // no color write). depthWrite is forced on even for transparent
                     // MMD materials, matching the flat path's geometry depth.
-                    leafMaterialMapRef.current.forEach((material) => {
+                    bakeMaterials.forEach((material) => {
                         material.visible = true;
                         material.colorWrite = false;
                         material.depthWrite = true;
                         material.depthFunc = THREE.LessEqualDepth;
                     });
-                    renderer.render(scene, isoCamera);
+                    renderer.render(bakeScene, isoCamera);
                     // Pass 2: only this drawable writes color. LessEqual + no depth
                     // write means a pixel survives only where this part is at or in
                     // front of the nearest full-scene surface (i.e. not covered).
-                    leafMaterialMapRef.current.forEach((material, leafId) => {
+                    bakeMaterials.forEach((material, leafId) => {
                         material.visible = leafIdSet.has(leafId);
                         material.colorWrite = true;
                         material.depthWrite = false;
                         material.depthFunc = THREE.LessEqualDepth;
                     });
-                    renderer.render(scene, isoCamera);
+                    renderer.render(bakeScene, isoCamera);
                     renderer.autoClear = previousAutoClear;
                 } else {
-                    renderer.render(scene, isoCamera);
+                    renderer.render(bakeScene, isoCamera);
                 }
                 const rgba = new Uint8Array(rtWidth * rtHeight * 4);
                 renderer.readRenderTargetPixels(renderTarget, 0, 0, rtWidth, rtHeight, rgba);
@@ -1278,7 +1283,7 @@ function App({
                     isoCamera.aspect = savedAspect;
                     isoCamera.updateProjectionMatrix();
                 }
-                scene.background = previousBackground;
+                bakeScene.background = previousBackground;
                 renderer.setClearAlpha(previousClearAlpha);
                 materialVisibility.forEach((visible, material) => {
                     material.visible = visible;
@@ -1303,7 +1308,7 @@ function App({
             forceNewProjectionFrameRef.current = false;
             try {
                 const { model: builtModel, bundle } = await buildLive2dModel({
-                    root,
+                    root: useUv ? uvRoot : root,
                     parts: bakeParts,
                     camera,
                     projector: webGpuProjector,
@@ -1313,6 +1318,7 @@ function App({
                     renderIsolated,
                     onProgress,
                     textureScale,
+                    textureOptions,
                 });
                 console.log('Live2D model built.', {
                     drawables: builtModel.drawables.length,
@@ -1348,6 +1354,7 @@ function App({
             modelRef.current = null;
             leafMaterialMapRef.current.clear();
             webGpuProjector.releaseMeshes(projectionPartsRef.current.map((part) => part.mesh));
+            if (uvSegmentation) webGpuProjector.releaseMeshes(uvSegmentation.projectionParts.map((part) => part.mesh));
             projectionPartsRef.current = [];
             projectionMaskStateRef.current = null;
             window.removeEventListener('resize', onResize);
@@ -1357,7 +1364,7 @@ function App({
             controls.dispose();
             controlsRef.current = null;
             renderer.setAnimationLoop(null);
-            if (model) disposeModelResources(model);
+            if (model) disposeModelResources(model, uvScene);
             renderer.dispose();
             mount.removeChild(renderer.domElement);
         };
@@ -1398,6 +1405,7 @@ function App({
     const handleBuildLive2d = async (
         onProgress: (stage: 'samples' | 'textures', done: number, total: number, detail: string) => void,
         textureScale: number,
+        textureOptions: BakeTextureOptions,
     ): Promise<BakeSummary> => {
         const runner = buildLive2dRef.current;
         if (!runner || assetStatus !== 'ready') {
@@ -1409,7 +1417,7 @@ function App({
         onOperationStateChange?.(true);
         if (controlsRef.current) controlsRef.current.enabled = false;
         try {
-            const { model, summary } = await runner(onProgress, textureScale);
+            const { model, summary } = await runner(onProgress, textureScale, textureOptions);
             setLive2dModel(model);
             return summary;
         } finally {

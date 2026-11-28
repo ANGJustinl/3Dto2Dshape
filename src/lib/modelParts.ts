@@ -1083,13 +1083,7 @@ const buildColorRegions = (triangles: TriangleRecord[]) => {
     return [...activeClusters.values()];
 };
 
-// [UV lighting] The UV path renders with the real 3D materials so the MMD
-// sphere-map / additive highlight / toon layers survive. The flat-paint path
-// still needs the simplified MeshBasicMaterial - that is what makes the clean
-// cel-shaded color blocks. Keep the branch behind the same page flag.
-const uvTexturePickEnabled = () => (globalThis as any).__uvTexturePick === true;
-
-const cloneLeafMaterial = (material: THREE.Material) => {
+const cloneLeafMaterial = (material: THREE.Material, useOriginalMaterials: boolean) => {
     const sourceMaterial = material as THREE.Material & {
         map?: THREE.Texture | null;
         alphaMap?: THREE.Texture | null;
@@ -1107,11 +1101,11 @@ const cloneLeafMaterial = (material: THREE.Material) => {
     // 723->856, edgeDensity 0.172->0.200, meanGradient 15.8->19.0; Cubism render
     // complete with no black holes. `__uvFlatUvMaterial=true` forces the old
     // MeshBasic fallback (diagnostic only).
-    if (uvTexturePickEnabled() && (globalThis as any).__uvFlatUvMaterial !== true) {
+    if (useOriginalMaterials && (globalThis as any).__uvFlatUvMaterial !== true) {
         return material.clone();
     }
 
-    if (uvTexturePickEnabled()) {
+    if (useOriginalMaterials) {
         // Diagnostic fallback: the previous lossless MeshBasic clone (kept for
         // A/B comparison; not used by default anymore).
         return new THREE.MeshBasicMaterial({
@@ -1144,6 +1138,7 @@ const buildMeshSegmentation = (
     leafMaterialMap: Map<string, THREE.Material>,
     debugMaterials: MaterialDebugInfo[],
     projectionParts: ProjectionPartSource[],
+    useOriginalMaterials: boolean,
 ) => {
     const indexedGeometry = ensureIndexedGeometry(mesh.geometry);
     const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
@@ -1155,10 +1150,11 @@ const buildMeshSegmentation = (
     // Diagnostic: even in UV mode, count what flat paint WOULD have dropped so
     // the log proves the keep-branch actually had something to restore.
     const uvFixProbe = (globalThis as any).__uvFixProbe ?? { kept: 0, skipped: 0, meshes: 0 };
-    if (uvTexturePickEnabled()) {
-        uvFixProbe.kept += findRedundantMaterialOverlayGroups(indexedGeometry, materials, groups).size;
+    const overlayGroups = findRedundantMaterialOverlayGroups(indexedGeometry, materials, groups);
+    if (useOriginalMaterials) {
+        uvFixProbe.kept += overlayGroups.size;
     } else {
-        uvFixProbe.skipped += findRedundantMaterialOverlayGroups(indexedGeometry, materials, groups).size;
+        uvFixProbe.skipped += overlayGroups.size;
     }
     uvFixProbe.meshes += 1;
     // Count MMD shading fields the MeshBasicMaterial clone silently drops:
@@ -1171,9 +1167,7 @@ const buildMeshSegmentation = (
     });
     (globalThis as any).__uvFixProbe = uvFixProbe;
 
-    const redundantOverlays = uvTexturePickEnabled()
-        ? new Set<number>()
-        : findRedundantMaterialOverlayGroups(indexedGeometry, materials, groups);
+    const redundantOverlays = useOriginalMaterials ? new Set<number>() : overlayGroups;
     mesh.userData.flatPaintOmittedOverlays = [...redundantOverlays].map((groupIndex) => ({
         materialName: materials[groups[groupIndex].materialIndex].name,
         triangleCount: groups[groupIndex].count / 3,
@@ -1254,7 +1248,7 @@ const buildMeshSegmentation = (
                 const colorLeafIds: string[] = [];
 
                 const leafId = `${mesh.uuid}-g${groupIndex}-m${group.materialIndex}-cg${clusterIndex}`;
-                const leafMaterial = cloneLeafMaterial(material);
+                const leafMaterial = cloneLeafMaterial(material, useOriginalMaterials);
                 leafMaterialMap.set(leafId, leafMaterial);
                 nextMaterials.push(leafMaterial);
                 leafIdByMaterialIndex.push(leafId);
@@ -1344,6 +1338,7 @@ export const splitModelParts = (
     root: THREE.Object3D,
     // Retained for existing callers; material compatibility is independent of labels.
     _modelName: string | null | undefined = root.name,
+    useOriginalMaterials = false,
 ): SegmentationResult => {
     const leafMaterialMap = new Map<string, THREE.Material>();
     const parts: PartNode[] = [];
@@ -1361,6 +1356,7 @@ export const splitModelParts = (
                 leafMaterialMap,
                 debugMaterials,
                 projectionParts,
+                useOriginalMaterials,
             ),
         );
     });
